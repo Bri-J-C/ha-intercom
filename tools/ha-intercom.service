@@ -1,0 +1,21 @@
+[Unit]
+Description=HA Intercom PTT Client
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/ha-intercom
+ExecStart=/home/pi/ha-intercom/venv/bin/python /home/pi/ha-intercom/tools/ptt_client_pi.py --name %H
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Audio - use default ALSA device
+Environment=AUDIODEV=default
+
+[Install]
+WantedBy=multi-user.target

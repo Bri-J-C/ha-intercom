@@ -1,0 +1,10 @@
+# HA Intercom Python Test Client Dependencies
+
+# Audio I/O
+sounddevice>=0.4.6
+
+# Opus codec
+opuslib>=3.0.1
+
+# For numpy arrays (audio processing)
+numpy>=1.24.0
