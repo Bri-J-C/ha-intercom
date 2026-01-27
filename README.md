@@ -13,7 +13,7 @@ Inspired by [PTTDroid](https://f-droid.org/en/packages/ro.ui.pttdroid/)'s simple
 - **Unicast** for room-to-room communication
 - **Home Assistant integration** with services and automations
 - **Opus codec** for high-quality, low-bandwidth audio
-- **ESP32-S3** based hardware satellites (~$17/room)
+- **ESP32-S3** based hardware satellites (~$16/room)
 
 ## Architecture
 
@@ -73,7 +73,11 @@ python tools/ptt_client.py --name bedroom
 - INMP441 I2S Microphone (~$3)
 - MAX98357A I2S Amp + Speaker (~$5)
 
-See `firmware/README.md` for wiring and flashing instructions.
+**Flash the firmware:**
+- **Easy:** [Web Flasher](https://bri-j-c.github.io/ha-intercom/) - flash directly from browser (Chrome/Edge)
+- **Manual:** Download from [Releases](https://github.com/Bri-J-C/ha-intercom/releases) and use esptool
+
+See `firmware/README.md` for wiring instructions.
 
 ### 3. Home Assistant Add-on
 
