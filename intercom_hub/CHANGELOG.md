@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.5] - 2026-01-26
+
+### Changed
+- Replaced placeholder icons with proper intercom icon
+
+### Added
+- Icon attribution in README
+
 ## [1.3.4] - 2026-01-26
 
 ### Added
