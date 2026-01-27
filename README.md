@@ -120,6 +120,10 @@ Click the button at the top of this README, or:
 
 Devices register via MQTT and appear automatically in Home Assistant.
 
+## Credits
+
+[Intercom icons created by Dixit Lakhani_02 - Flaticon](https://www.flaticon.com/free-icons/intercom)
+
 ## License
 
 MIT
