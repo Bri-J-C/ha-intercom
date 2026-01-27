@@ -32,8 +32,8 @@ A Home Assistant add-on that acts as a multicast intercom node, enabling TTS ann
 ```yaml
 mqtt_host: core-mosquitto      # MQTT broker hostname
 mqtt_port: 1883                # MQTT broker port
-mqtt_user: ""                  # MQTT username (optional)
-mqtt_password: ""              # MQTT password (optional)
+mqtt_user: "homeassistant"     # MQTT username (required)
+mqtt_password: "your_password" # MQTT password (required)
 device_name: "Intercom Hub"    # Display name in HA
 multicast_group: "224.0.0.100" # Must match ESP32 firmware
 multicast_port: 5005           # Must match ESP32 firmware
