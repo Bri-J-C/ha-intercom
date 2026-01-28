@@ -25,30 +25,38 @@ static const char *HTML_PAGE =
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>Intercom Setup</title>"
 "<style>"
-"body{font-family:sans-serif;max-width:400px;margin:20px auto;padding:0 10px;}"
-"h1{color:#333;font-size:24px;}"
-"form{background:#f5f5f5;padding:20px;border-radius:8px;margin:10px 0;}"
-"label{display:block;margin:10px 0 5px;font-weight:bold;}"
+"body{font-family:sans-serif;max-width:400px;margin:20px auto;padding:0 10px;background:#1a1a2e;color:#eee;}"
+"h1{color:#4CAF50;font-size:24px;}"
+"h3{color:#64B5F6;margin-top:15px;}"
+"form{background:#16213e;padding:20px;border-radius:8px;margin:10px 0;}"
+"label{display:block;margin:10px 0 5px;color:#64B5F6;}"
 "input[type=text],input[type=password],input[type=number]{"
-"width:100%%;padding:8px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;}"
+"width:100%%;padding:8px;border:1px solid #0f3460;border-radius:4px;box-sizing:border-box;background:#0f3460;color:#eee;}"
+"input[type=text]:focus,input[type=password]:focus,input[type=number]:focus{outline:none;border-color:#4CAF50;}"
 "input[type=checkbox]{margin-right:8px;}"
-"input[type=submit]{background:#007bff;color:white;border:none;padding:10px 20px;"
-"border-radius:4px;cursor:pointer;margin-top:10px;}"
-"input[type=submit]:hover{background:#0056b3;}"
-".info{background:#e7f3ff;padding:10px;border-radius:4px;margin:10px 0;}"
-".danger{background:#ffe0e0;}"
+"input[type=submit]{background:#4CAF50;color:white;border:none;padding:10px 20px;"
+"border-radius:4px;cursor:pointer;margin-top:10px;width:100%%;}"
+"input[type=submit]:hover{background:#45a049;}"
+"input[type=file]{color:#64B5F6;}"
+".info{background:#0f3460;padding:12px;border-radius:8px;margin:10px 0;border-left:4px solid #4CAF50;}"
+".danger{background:#2d1a1a;border:1px solid #f44336;}"
+".danger h3{color:#f44336;}"
 ".danger input[type=submit]{background:#dc3545;}"
+".danger input[type=submit]:hover{background:#c82333;}"
 ".row{display:flex;gap:10px;}"
 ".row>*{flex:1;}"
 "</style></head><body>"
-"<h1>Intercom Setup</h1>"
+"<div style='display:flex;align-items:center;gap:12px;margin-bottom:20px;'>"
+"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512' width='40' height='40'><defs><linearGradient id='g' x1='0%%' y1='0%%' x2='100%%' y2='100%%'><stop offset='0%%' stop-color='#00D4FF'/><stop offset='100%%' stop-color='#6366F1'/></linearGradient></defs><rect x='20' y='20' width='472' height='472' rx='80' ry='80' fill='none' stroke='url(#g)' stroke-width='40'/><rect x='136' y='120' width='40' height='180' rx='20' fill='url(#g)'/><rect x='196' y='100' width='40' height='220' rx='20' fill='url(#g)'/><rect x='276' y='100' width='40' height='220' rx='20' fill='url(#g)'/><rect x='336' y='120' width='40' height='180' rx='20' fill='url(#g)'/><path d='M156 340 Q256 420 356 340' fill='none' stroke='url(#g)' stroke-width='36' stroke-linecap='round'/></svg>"
+"<h1 style='margin:0;'>Intercom Setup</h1>"
+"</div>"
 "<div class='info'>"
 "<strong>Room:</strong> %s<br>"
 "<strong>IP:</strong> %s<br>"
 "<strong>MQTT:</strong> %s<br>"
 "<strong>Version:</strong> 1.3.0 by guywithacomputer"
 "</div>"
-"<a href='/diagnostics' style='display:block;background:#17a2b8;color:white;text-align:center;padding:10px;border-radius:4px;text-decoration:none;margin:10px 0;'>View Diagnostics &amp; Logs</a>"
+"<a href='/diagnostics' style='display:block;background:#64B5F6;color:#1a1a2e;text-align:center;padding:10px;border-radius:4px;text-decoration:none;margin:10px 0;font-weight:bold;'>View Diagnostics &amp; Logs</a>"
 "<form action='/save' method='POST'>"
 "<h3>WiFi Settings</h3>"
 "<label>SSID</label><input type='text' name='ssid' value='%s'>"
@@ -98,21 +106,25 @@ static const char *HTML_DIAG_HEADER =
 "<meta http-equiv='refresh' content='5'>"
 "<title>Diagnostics</title>"
 "<style>"
-"body{font-family:sans-serif;max-width:800px;margin:20px auto;padding:0 10px;background:#f0f0f0;}"
-"h1{color:#333;font-size:24px;}"
-".card{background:white;padding:15px;border-radius:8px;margin:10px 0;box-shadow:0 2px 4px rgba(0,0,0,0.1);}"
+"body{font-family:sans-serif;max-width:800px;margin:20px auto;padding:0 10px;background:#1a1a2e;color:#eee;}"
+"h1{color:#4CAF50;font-size:24px;}"
+"h3{color:#64B5F6;margin-top:0;}"
+".card{background:#16213e;padding:15px;border-radius:8px;margin:10px 0;}"
 ".stat{display:inline-block;margin:10px 20px 10px 0;}"
-".stat-value{font-size:24px;font-weight:bold;color:#007bff;}"
-".stat-label{font-size:12px;color:#666;}"
-".warn{color:#ffc107;}.error{color:#dc3545;}.ok{color:#28a745;}"
-"a{color:#007bff;}"
+".stat-value{font-size:24px;font-weight:bold;color:#4CAF50;}"
+".stat-label{font-size:12px;color:#64B5F6;}"
+".warn{color:#ffc107;}.error{color:#f44336;}.ok{color:#4CAF50;}"
+"a{color:#64B5F6;}"
 ".reset-reason{padding:8px 12px;border-radius:4px;display:inline-block;margin:5px 0;}"
-".reset-power{background:#e7f3ff;color:#0056b3;}"
-".reset-sw{background:#fff3cd;color:#856404;}"
-".reset-crash{background:#f8d7da;color:#721c24;}"
-".reset-wdt{background:#f8d7da;color:#721c24;}"
+".reset-power{background:#0f3460;color:#64B5F6;}"
+".reset-sw{background:#3d3d1a;color:#ffc107;}"
+".reset-crash{background:#3d1a1a;color:#f44336;}"
+".reset-wdt{background:#3d1a1a;color:#f44336;}"
 "</style></head><body>"
-"<h1>Diagnostics</h1>"
+"<div style='display:flex;align-items:center;gap:12px;margin-bottom:10px;'>"
+"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512' width='32' height='32'><defs><linearGradient id='g2' x1='0%%' y1='0%%' x2='100%%' y2='100%%'><stop offset='0%%' stop-color='#00D4FF'/><stop offset='100%%' stop-color='#6366F1'/></linearGradient></defs><rect x='20' y='20' width='472' height='472' rx='80' ry='80' fill='none' stroke='url(#g2)' stroke-width='40'/><rect x='136' y='120' width='40' height='180' rx='20' fill='url(#g2)'/><rect x='196' y='100' width='40' height='220' rx='20' fill='url(#g2)'/><rect x='276' y='100' width='40' height='220' rx='20' fill='url(#g2)'/><rect x='336' y='120' width='40' height='180' rx='20' fill='url(#g2)'/><path d='M156 340 Q256 420 356 340' fill='none' stroke='url(#g2)' stroke-width='36' stroke-linecap='round'/></svg>"
+"<h1 style='margin:0;'>Diagnostics</h1>"
+"</div>"
 "<p><a href='/'>&#8592; Back to Settings</a></p>";
 
 static const char *HTML_DIAG_FOOTER =
@@ -194,7 +206,7 @@ static esp_err_t root_handler(httpd_req_t *req)
     char ip[16] = "0.0.0.0";
     get_ip_string(ip, sizeof(ip));
 
-    char *html = malloc(4096);
+    char *html = malloc(5120);
     if (!html) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
@@ -203,7 +215,7 @@ static esp_err_t root_handler(httpd_req_t *req)
     const char *mqtt_status = s->mqtt_enabled ?
         (strlen(s->mqtt_host) > 0 ? "Enabled" : "Not configured") : "Disabled";
 
-    snprintf(html, 4096, HTML_PAGE,
+    snprintf(html, 5120, HTML_PAGE,
              s->room_name, ip, mqtt_status,
              get_current_ssid(), s->room_name, s->volume,
              s->mqtt_enabled ? "checked" : "",
