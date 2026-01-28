@@ -44,7 +44,7 @@ multicast_port: 5005           # Must match ESP32 firmware
 ### TTS Announcements
 
 ```yaml
-service: notify.intercom_hub
+action: notify.intercom_hub
 data:
   message: "Dinner is ready!"
 ```
@@ -52,7 +52,7 @@ data:
 ### Broadcast to Specific Room
 
 ```yaml
-service: notify.intercom_hub
+action: notify.intercom_hub
 data:
   message: "Come to the kitchen!"
   target: "living_room"  # Optional: specific room or "all" for broadcast
@@ -61,16 +61,19 @@ data:
 ### Automations
 
 ```yaml
-automation:
-  - alias: "Doorbell Announcement"
-    trigger:
-      - platform: state
-        entity_id: binary_sensor.doorbell
-        to: "on"
-    action:
-      - service: notify.intercom_hub
-        data:
-          message: "Someone is at the door"
+alias: Doorbell Announcement
+description: "Announce when someone rings the doorbell"
+triggers:
+  - trigger: state
+    entity_id:
+      - binary_sensor.doorbell
+    to: "on"
+conditions: []
+actions:
+  - action: notify.intercom_hub
+    data:
+      message: "Someone is at the door"
+mode: single
 ```
 
 ## Entities Created
