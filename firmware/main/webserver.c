@@ -117,6 +117,7 @@ static const char *HTML_DIAG_HEADER =
 
 static const char *HTML_DIAG_FOOTER =
 "<p style='color:#888;font-size:12px;'>Auto-refresh every 5 seconds</p>"
+"<script>window.onload=function(){var l=document.getElementById('logbox');if(l)l.scrollTop=l.scrollHeight;}</script>"
 "</body></html>";
 
 // Get IP address string
