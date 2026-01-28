@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.8] - 2026-01-27
+
+### Added
+- Custom AppArmor security profile for improved security rating
+  - Restricts filesystem access to only required paths
+  - Denies raw sockets, mount operations, and dangerous capabilities
+  - Protects sensitive paths (homeassistant config, SSL, SSH keys)
+  - Allows only necessary network access (TCP/UDP for MQTT, multicast, TTS)
+
+### Changed
+- Security rating improved from 4 to 5
+
 ## [1.3.7] - 2026-01-27
 
 ### Changed

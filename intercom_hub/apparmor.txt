@@ -1,0 +1,83 @@
+#include <tunables/global>
+
+profile intercom_hub flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/python>
+
+  # Capabilities
+  file,
+  signal (send) set=(kill,term,int,hup,cont),
+
+  # Network access - required for MQTT, UDP multicast, and Piper TTS
+  network inet dgram,      # UDP (multicast/unicast audio)
+  network inet stream,     # TCP (MQTT, Piper TTS)
+  network inet6 dgram,     # IPv6 UDP
+  network inet6 stream,    # IPv6 TCP
+
+  # Deny raw sockets - not needed
+  deny network raw,
+
+  # S6-Overlay / Container init
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /run/{,**} rwk,
+  /dev/tty rw,
+
+  # Bashio
+  /usr/lib/bashio/** ix,
+  /tmp/** rwk,
+
+  # Add-on data (options.json, etc)
+  /data/** rw,
+
+  # Python interpreter and libraries
+  /usr/bin/python3* rix,
+  /usr/lib/python3*/** r,
+  /usr/lib/python3*/**/*.so mr,
+
+  # Application files
+  /intercom_hub.py r,
+  /run.sh rix,
+  /requirements.txt r,
+
+  # FFmpeg for audio conversion
+  /usr/bin/ffmpeg rix,
+  /usr/bin/ffprobe rix,
+
+  # Opus codec library
+  /usr/lib/libopus* mr,
+
+  # System libraries needed by Python packages
+  /lib/** mr,
+  /usr/lib/** mr,
+
+  # Proc filesystem - limited access
+  /proc/sys/net/** r,
+  @{PROC}/@{pid}/fd/ r,
+  @{PROC}/@{pid}/stat r,
+  @{PROC}/@{pid}/cmdline r,
+
+  # Deny sensitive paths
+  deny /data/homeassistant/** rw,
+  deny /data/ssl/** rw,
+  deny /root/.ssh/** rw,
+  deny /etc/shadow r,
+  deny /etc/passwd w,
+
+  # Deny dangerous operations
+  deny mount,
+  deny umount,
+  deny ptrace,
+  deny capability sys_admin,
+  deny capability sys_ptrace,
+  deny capability sys_module,
+  deny capability sys_rawio,
+  deny capability dac_override,
+}
