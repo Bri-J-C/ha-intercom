@@ -71,6 +71,7 @@ typedef enum {
     LED_STATE_RECEIVING,    // Solid blue - receiving
     LED_STATE_MUTED,        // Solid red - muted
     LED_STATE_ERROR,        // Blinking red - error
+    LED_STATE_BUSY,         // Solid orange - channel busy (someone else talking)
 } led_state_t;
 
 #endif // PROTOCOL_H

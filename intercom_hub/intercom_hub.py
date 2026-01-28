@@ -89,6 +89,7 @@ tx_socket = None
 rx_socket = None
 last_rx_time = 0
 rx_timeout = 0.5  # seconds before going back to idle
+channel_wait_timeout = 5.0  # max seconds to wait for channel before sending
 
 # Discovered devices: {unique_id: {"room": "Kitchen", "ip": "192.168.1.50"}}
 discovered_devices = {}
@@ -163,6 +164,49 @@ def get_target_ip():
     # Target not found, fall back to multicast
     print(f"Warning: Target '{current_target}' not found, using multicast")
     return None
+
+
+def is_channel_busy():
+    """Check if channel is busy (someone else is transmitting)."""
+    global current_state, last_rx_time
+
+    if current_state != "receiving":
+        return False
+
+    # Double-check with timeout (receive_thread may not have updated yet)
+    if time.time() - last_rx_time > rx_timeout:
+        return False
+
+    return True
+
+
+def wait_for_channel(timeout=None):
+    """Wait for the channel to be free before transmitting.
+
+    Args:
+        timeout: Max seconds to wait. Defaults to channel_wait_timeout.
+
+    Returns:
+        True if channel is free, False if timeout (will send anyway).
+    """
+    if timeout is None:
+        timeout = channel_wait_timeout
+
+    if not is_channel_busy():
+        return True
+
+    print("Channel busy - waiting for it to be free...")
+    start = time.time()
+
+    while time.time() - start < timeout:
+        if not is_channel_busy():
+            waited = time.time() - start
+            print(f"Channel free after {waited:.1f}s")
+            return True
+        time.sleep(0.1)
+
+    print(f"Channel busy timeout ({timeout}s) - sending anyway")
+    return False
 
 
 def receive_thread():
@@ -323,6 +367,9 @@ def encode_and_broadcast(pcm_data):
     if len(pcm_data) == 0:
         return
 
+    # Wait for channel to be free (first-to-talk collision avoidance)
+    wait_for_channel()
+
     # Get target IP (None = multicast to all)
     target_ip = get_target_ip()
     target_desc = f"to {current_target}" if target_ip else "to all rooms"
@@ -437,7 +484,7 @@ def publish_discovery():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.3.0"
+        "sw_version": "1.4.0"
     }
 
     # Notify entity - send text (TTS) or URL to broadcast
@@ -573,7 +620,7 @@ def update_target_select_options():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.3.0"
+        "sw_version": "1.4.0"
     }
 
     options = get_target_options()
@@ -707,7 +754,7 @@ def main():
     global mqtt_client, tx_socket, rx_socket
 
     print("=" * 50)
-    print("Intercom Hub v1.3.0")
+    print("Intercom Hub v1.4.0")
     print(f"Device ID: {DEVICE_ID_STR}")
     print(f"Unique ID: {UNIQUE_ID}")
     print("=" * 50)
