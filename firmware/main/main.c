@@ -293,16 +293,45 @@ void app_main(void)
 
     esp_err_t ret = network_wait_connected(30000);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "WiFi connection timeout!");
+        ESP_LOGW(TAG, "WiFi connection timeout - check AP mode");
         button_set_led_state(LED_STATE_ERROR);
+
+        // Wait a bit for AP mode to fully start
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        // Start webserver in AP mode for configuration
+        if (network_is_ap_mode()) {
+            network_start_mdns("intercom-setup");
+            webserver_start();
+            ESP_LOGI(TAG, "AP mode active - configure at http://192.168.4.1/ or http://intercom-setup.local/");
+        }
     } else {
         char ip_str[16];
         network_get_ip(ip_str);
         ESP_LOGI(TAG, "Connected! IP: %s", ip_str);
 
+        // Start mDNS with sanitized room name as hostname
+        char hostname[32];
+        const char *room = cfg->room_name;
+        int j = 0;
+        for (int i = 0; room[i] && j < sizeof(hostname) - 1; i++) {
+            char c = room[i];
+            if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+                hostname[j++] = c;
+            } else if (c >= 'A' && c <= 'Z') {
+                hostname[j++] = c + 32;  // lowercase
+            } else if (c == ' ' || c == '-' || c == '_') {
+                if (j > 0 && hostname[j-1] != '-') hostname[j++] = '-';
+            }
+        }
+        hostname[j] = '\0';
+        if (j == 0) strcpy(hostname, "intercom");
+
+        network_start_mdns(hostname);
+        ESP_LOGI(TAG, "Access at http://%s.local/", hostname);
+
         // Start web server for config/OTA
         webserver_start();
-        ESP_LOGI(TAG, "Web config at http://%s/", ip_str);
 
         // Start MQTT for Home Assistant integration
         ha_mqtt_start();

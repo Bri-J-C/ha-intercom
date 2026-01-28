@@ -9,22 +9,32 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_mac.h"
 #include "nvs_flash.h"
+#include "mdns.h"
 #include "lwip/sockets.h"
 #include "lwip/igmp.h"
 #include <string.h>
 
 static const char *TAG = "network";
 
-static esp_netif_t *netif = NULL;
+static esp_netif_t *sta_netif = NULL;
+static esp_netif_t *ap_netif = NULL;
 static bool wifi_connected = false;
+static bool ap_mode_active = false;
 static esp_ip4_addr_t local_ip = {0};
+static int connection_retries = 0;
+#define MAX_RETRIES 10
+#define AP_SSID_PREFIX "Intercom-"
 
 static int tx_socket = -1;
 static int rx_socket = -1;
 static TaskHandle_t rx_task_handle = NULL;
 static network_rx_callback_t rx_callback = NULL;
 static bool rx_running = false;
+
+// Forward declaration
+static void start_ap_mode(void);
 
 // WiFi event handler
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -37,17 +47,75 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                 esp_wifi_connect();
                 break;
             case WIFI_EVENT_STA_DISCONNECTED:
-                ESP_LOGW(TAG, "WiFi disconnected, reconnecting...");
                 wifi_connected = false;
-                esp_wifi_connect();
+                connection_retries++;
+                if (connection_retries >= MAX_RETRIES && !ap_mode_active) {
+                    ESP_LOGW(TAG, "WiFi connection failed after %d attempts, starting AP mode", MAX_RETRIES);
+                    start_ap_mode();
+                } else if (!ap_mode_active) {
+                    ESP_LOGW(TAG, "WiFi disconnected, retry %d/%d...", connection_retries, MAX_RETRIES);
+                    esp_wifi_connect();
+                }
+                break;
+            case WIFI_EVENT_AP_STACONNECTED:
+                ESP_LOGI(TAG, "Station connected to AP");
+                break;
+            case WIFI_EVENT_AP_STADISCONNECTED:
+                ESP_LOGI(TAG, "Station disconnected from AP");
                 break;
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         local_ip = event->ip_info.ip;
         wifi_connected = true;
+        connection_retries = 0;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&local_ip));
     }
+}
+
+// Start AP mode for configuration
+static void start_ap_mode(void)
+{
+    if (ap_mode_active) return;
+
+    ESP_LOGI(TAG, "Starting AP mode for configuration...");
+
+    // Stop STA mode
+    esp_wifi_stop();
+
+    // Create AP netif if not exists
+    if (!ap_netif) {
+        ap_netif = esp_netif_create_default_wifi_ap();
+    }
+
+    // Generate AP SSID from MAC
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char ap_ssid[32];
+    snprintf(ap_ssid, sizeof(ap_ssid), "%s%02X%02X", AP_SSID_PREFIX, mac[4], mac[5]);
+
+    wifi_config_t ap_config = {
+        .ap = {
+            .channel = 1,
+            .max_connection = 4,
+            .authmode = WIFI_AUTH_OPEN,
+            .pmf_cfg = { .required = false },
+        },
+    };
+    strncpy((char *)ap_config.ap.ssid, ap_ssid, sizeof(ap_config.ap.ssid));
+    ap_config.ap.ssid_len = strlen(ap_ssid);
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ap_mode_active = true;
+
+    // Set AP IP as local_ip so webserver works
+    local_ip.addr = esp_ip4addr_aton("192.168.4.1");
+
+    ESP_LOGI(TAG, "AP mode started: SSID='%s' (open), IP=192.168.4.1", ap_ssid);
+    ESP_LOGI(TAG, "Connect to this network and go to http://192.168.4.1 to configure");
 }
 
 esp_err_t network_init(const char *ssid, const char *password)
@@ -60,7 +128,7 @@ esp_err_t network_init(const char *ssid, const char *password)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    netif = esp_netif_create_default_wifi_sta();
+    sta_netif = esp_netif_create_default_wifi_sta();
 
     // Initialize WiFi
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -112,6 +180,11 @@ esp_err_t network_wait_connected(uint32_t timeout_ms)
 bool network_is_connected(void)
 {
     return wifi_connected;
+}
+
+bool network_is_ap_mode(void)
+{
+    return ap_mode_active;
 }
 
 void network_get_ip(char *ip_str)
@@ -274,8 +347,36 @@ esp_err_t network_send_unicast(const audio_packet_t *packet, size_t len, const c
     return (sent == len) ? ESP_OK : ESP_FAIL;
 }
 
+esp_err_t network_start_mdns(const char *hostname)
+{
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mDNS init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Set hostname (what appears before .local)
+    err = mdns_hostname_set(hostname);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mDNS hostname set failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Set instance name
+    char instance[64];
+    snprintf(instance, sizeof(instance), "Intercom - %s", hostname);
+    mdns_instance_name_set(instance);
+
+    // Advertise HTTP service
+    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+
+    ESP_LOGI(TAG, "mDNS started: %s.local", hostname);
+    return ESP_OK;
+}
+
 void network_deinit(void)
 {
+    mdns_free();
     network_stop_rx();
 
     if (tx_socket >= 0) {

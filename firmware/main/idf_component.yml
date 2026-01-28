@@ -10,3 +10,6 @@ dependencies:
 
   # LED strip for WS2812 onboard RGB LED
   espressif/led_strip: "^2.5.0"
+
+  # mDNS for .local hostname resolution
+  espressif/mdns: "^1.0.0"
