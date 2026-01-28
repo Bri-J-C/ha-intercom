@@ -22,7 +22,15 @@ import hashlib
 import threading
 import subprocess
 import time
+import asyncio
+from pathlib import Path
 import paho.mqtt.client as mqtt
+
+try:
+    from aiohttp import web
+except ImportError:
+    print("aiohttp not available - web PTT disabled")
+    web = None
 
 try:
     import opuslib
@@ -96,6 +104,14 @@ tx_lock = threading.Lock()
 
 # Discovered devices: {unique_id: {"room": "Kitchen", "ip": "192.168.1.50"}}
 discovered_devices = {}
+
+# Web PTT state
+web_clients = set()  # Connected WebSocket clients
+web_ptt_active = False  # Is a web client transmitting
+web_ptt_encoder = None  # Opus encoder for web PTT
+web_event_loop = None  # Event loop for async web operations
+INGRESS_PORT = int(os.environ.get('INGRESS_PORT', '8099'))
+WWW_PATH = Path(__file__).parent / 'www'
 
 
 def create_tx_socket():
@@ -499,7 +515,7 @@ def publish_discovery():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.5.1"
+        "sw_version": "1.6.1"
     }
 
     # Notify entity - send text (TTS) or URL to broadcast
@@ -593,9 +609,28 @@ def publish_discovery():
 
 
 def publish_state():
-    """Publish current state."""
+    """Publish current state to MQTT and web clients."""
     if mqtt_client and mqtt_client.is_connected():
         mqtt_client.publish(STATE_TOPIC, current_state, retain=True)
+
+    # Also notify web clients (thread-safe)
+    notify_web_clients_state()
+
+
+def notify_web_clients_state():
+    """Notify web clients of state change (thread-safe)."""
+    global web_event_loop
+
+    if not web_clients or web_event_loop is None:
+        return
+
+    try:
+        asyncio.run_coroutine_threadsafe(
+            broadcast_to_web_clients({'type': 'state', 'status': current_state}),
+            web_event_loop
+        )
+    except Exception as e:
+        print(f"Error notifying web clients: {e}")
 
 
 def publish_volume():
@@ -635,7 +670,7 @@ def update_target_select_options():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.5.1"
+        "sw_version": "1.6.1"
     }
 
     options = get_target_options()
@@ -765,11 +800,236 @@ def on_mqtt_disconnect(client, userdata, disconnect_flags, reason_code, properti
     print(f"Disconnected from MQTT (rc={reason_code})")
 
 
+# =============================================================================
+# Web PTT Server (for ingress panel)
+# =============================================================================
+
+async def websocket_handler(request):
+    """Handle WebSocket connections for web PTT."""
+    global web_ptt_active, web_ptt_encoder, current_state
+
+    print(f"WebSocket connection request from {request.remote}")
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    print(f"WebSocket prepared for {request.remote}")
+
+    web_clients.add(ws)
+    print(f"Web PTT client connected ({len(web_clients)} total)")
+
+    # Create encoder for this session if needed
+    if opuslib and web_ptt_encoder is None:
+        web_ptt_encoder = opuslib.Encoder(SAMPLE_RATE, CHANNELS, opuslib.APPLICATION_VOIP)
+        web_ptt_encoder.bitrate = OPUS_BITRATE
+
+    # Send current state and target list
+    await ws.send_json({
+        'type': 'state',
+        'status': current_state
+    })
+    await ws.send_json({
+        'type': 'targets',
+        'rooms': sorted(set(d['room'] for d in discovered_devices.values()))
+    })
+
+    ptt_active = False
+    ptt_target = None
+    frame_count = 0
+    lead_in_sent = False
+
+    try:
+        async for msg in ws:
+            if msg.type == web.WSMsgType.BINARY:
+                # PCM audio data from browser (640 bytes = 320 samples * 2 bytes)
+                if ptt_active and web_ptt_encoder and len(msg.data) == FRAME_SIZE * 2:
+                    # Send lead-in silence on first frame
+                    if not lead_in_sent:
+                        silence_pcm = bytes(FRAME_SIZE * 2)
+                        silence_opus = web_ptt_encoder.encode(silence_pcm, FRAME_SIZE)
+                        for _ in range(15):  # 300ms lead-in
+                            send_audio_packet(silence_opus, ptt_target)
+                            await asyncio.sleep(FRAME_DURATION_MS / 1000.0)
+                        lead_in_sent = True
+
+                    # Encode and send
+                    opus_data = web_ptt_encoder.encode(msg.data, FRAME_SIZE)
+                    send_audio_packet(opus_data, ptt_target)
+                    frame_count += 1
+
+            elif msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    msg_type = data.get('type')
+
+                    if msg_type == 'ptt_start':
+                        if not is_channel_busy() and not web_ptt_active:
+                            ptt_active = True
+                            web_ptt_active = True
+                            lead_in_sent = False
+                            frame_count = 0
+
+                            # Get target IP
+                            target_room = data.get('target', 'all')
+                            if target_room == 'all':
+                                ptt_target = None
+                            else:
+                                ptt_target = None
+                                for dev in discovered_devices.values():
+                                    if dev.get('room') == target_room:
+                                        ptt_target = dev.get('ip')
+                                        break
+
+                            current_state = "transmitting"
+                            publish_state()
+                            print(f"Web PTT started -> {target_room}")
+
+                            # Notify all web clients
+                            await broadcast_to_web_clients({
+                                'type': 'state',
+                                'status': 'transmitting'
+                            })
+                        else:
+                            await ws.send_json({'type': 'busy'})
+
+                    elif msg_type == 'ptt_stop':
+                        if ptt_active:
+                            # Send trail-out silence
+                            if web_ptt_encoder and lead_in_sent:
+                                silence_pcm = bytes(FRAME_SIZE * 2)
+                                silence_opus = web_ptt_encoder.encode(silence_pcm, FRAME_SIZE)
+                                for _ in range(30):  # 600ms trail-out
+                                    send_audio_packet(silence_opus, ptt_target)
+                                    await asyncio.sleep(FRAME_DURATION_MS / 1000.0)
+
+                            ptt_active = False
+                            web_ptt_active = False
+                            current_state = "idle"
+                            publish_state()
+                            print(f"Web PTT stopped ({frame_count} frames)")
+
+                            await broadcast_to_web_clients({
+                                'type': 'state',
+                                'status': 'idle'
+                            })
+
+                    elif msg_type == 'get_state':
+                        await ws.send_json({
+                            'type': 'state',
+                            'status': current_state
+                        })
+                        await ws.send_json({
+                            'type': 'targets',
+                            'rooms': sorted(set(d['room'] for d in discovered_devices.values()))
+                        })
+
+                    elif msg_type == 'set_target':
+                        # Just acknowledge - actual target used at PTT start
+                        pass
+
+                except json.JSONDecodeError:
+                    pass
+
+            elif msg.type == web.WSMsgType.ERROR:
+                print(f"WebSocket error: {ws.exception()}")
+
+    except Exception as e:
+        print(f"WebSocket handler error: {e}")
+
+    finally:
+        # Clean up on disconnect
+        if ptt_active:
+            web_ptt_active = False
+            current_state = "idle"
+            publish_state()
+
+        web_clients.discard(ws)
+        print(f"Web PTT client disconnected ({len(web_clients)} remaining)")
+
+    return ws
+
+
+async def broadcast_to_web_clients(message):
+    """Send a message to all connected web clients."""
+    if not web_clients:
+        return
+
+    for client in web_clients.copy():
+        try:
+            if isinstance(message, dict):
+                await client.send_json(message)
+            else:
+                await client.send_bytes(message)
+        except Exception:
+            web_clients.discard(client)
+
+
+async def index_handler(request):
+    """Serve the main PTT page."""
+    print(f"Index request: {request.path}")
+    return web.FileResponse(WWW_PATH / 'index.html')
+
+
+async def static_handler(request):
+    """Serve static files."""
+    filename = request.match_info.get('filename', 'index.html')
+    filepath = WWW_PATH / filename
+    print(f"Static request: {request.path} -> {filepath}")
+
+    if filepath.exists() and filepath.is_file():
+        return web.FileResponse(filepath)
+    else:
+        print(f"File not found: {filepath}")
+        raise web.HTTPNotFound()
+
+
+def create_web_app():
+    """Create the aiohttp web application."""
+    app = web.Application()
+
+    # Routes - order matters! Specific routes before wildcards
+    # Use /ws instead of /api/websocket to avoid conflict with HA's WebSocket API
+    app.router.add_get('/ws', websocket_handler)
+    app.router.add_get('/', index_handler)
+    app.router.add_static('/static', WWW_PATH)
+    app.router.add_get('/{filename:.*}', static_handler)
+
+    return app
+
+
+async def run_web_server():
+    """Run the web server for ingress."""
+    global web_event_loop
+
+    if web is None:
+        print("Web server not available (aiohttp not installed)")
+        return
+
+    # Store reference to event loop for thread-safe callbacks
+    web_event_loop = asyncio.get_running_loop()
+
+    app = create_web_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(runner, '0.0.0.0', INGRESS_PORT)
+    await site.start()
+
+    print(f"Web PTT server running on port {INGRESS_PORT}")
+
+    # Keep running
+    while True:
+        await asyncio.sleep(3600)
+
+
+def run_mqtt_loop():
+    """Run MQTT loop in a thread."""
+    mqtt_client.loop_forever()
+
+
 def main():
     global mqtt_client, tx_socket, rx_socket
 
     print("=" * 50)
-    print("Intercom Hub v1.5.1")
+    print("Intercom Hub v1.6.1")
     print(f"Device ID: {DEVICE_ID_STR}")
     print(f"Unique ID: {UNIQUE_ID}")
     print("=" * 50)
@@ -806,9 +1066,20 @@ def main():
         print(f"Failed to connect to MQTT: {e}")
         sys.exit(1)
 
-    # Run MQTT loop
+    # Start MQTT loop in background thread
+    mqtt_thread = threading.Thread(target=run_mqtt_loop, daemon=True)
+    mqtt_thread.start()
+
+    # Run web server in main thread (for ingress panel)
     print("Intercom Hub running...")
-    mqtt_client.loop_forever()
+    if web is not None:
+        try:
+            asyncio.run(run_web_server())
+        except KeyboardInterrupt:
+            print("Shutting down...")
+    else:
+        # Fallback if aiohttp not available - just run MQTT
+        mqtt_client.loop_forever()
 
 
 if __name__ == "__main__":
