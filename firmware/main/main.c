@@ -187,6 +187,9 @@ static void on_audio_received(const audio_packet_t *packet, size_t total_len)
 /**
  * Audio transmit task - requires 32KB stack for Opus encoding.
  * Research: ESP32 Opus encoding needs 30KB+ stack.
+ *
+ * Sends lead-in silence (300ms) before mic audio and trail-out silence
+ * (600ms) after to ensure clean playback on receivers.
  */
 static void audio_tx_task(void *arg)
 {
@@ -195,7 +198,67 @@ static void audio_tx_task(void *arg)
     audio_packet_t *packet = (audio_packet_t *)tx_packet_buffer;
     memcpy(packet->device_id, device_id, DEVICE_ID_LENGTH);
 
+    // Silence buffer for lead-in/trail-out
+    static int16_t silence_pcm[FRAME_SIZE] = {0};
+    static uint8_t silence_opus[MAX_PACKET_SIZE];
+    int silence_opus_len = 0;
+
+    // Pre-encode silence frame
+    silence_opus_len = codec_encode(silence_pcm, silence_opus, sizeof(silence_opus));
+    if (silence_opus_len <= 0) {
+        ESP_LOGE(TAG, "Failed to encode silence frame");
+        silence_opus_len = 0;
+    }
+
+    bool was_transmitting = false;
+
     while (tx_task_running) {
+        // Detect start of transmission - send lead-in silence
+        if (transmitting && !was_transmitting) {
+            was_transmitting = true;
+            ESP_LOGI(TAG, "TX started - sending lead-in silence");
+
+            // Send 15 frames of silence (300ms) to prime receiver jitter buffer
+            if (silence_opus_len > 0) {
+                for (int i = 0; i < 15; i++) {
+                    packet->sequence = htonl(tx_sequence++);
+                    memcpy(packet->opus_data, silence_opus, silence_opus_len);
+
+                    const char *target_ip = ha_mqtt_get_target_ip();
+                    if (target_ip) {
+                        network_send_unicast(packet, HEADER_LENGTH + silence_opus_len, target_ip);
+                    } else {
+                        network_send_multicast(packet, HEADER_LENGTH + silence_opus_len);
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(FRAME_DURATION_MS));
+                }
+            }
+        }
+
+        // Detect end of transmission - send trail-out silence
+        if (!transmitting && was_transmitting) {
+            ESP_LOGI(TAG, "TX ended - sending trail-out silence");
+
+            // Send 30 frames of silence (600ms) to flush receiver DMA buffers
+            if (silence_opus_len > 0) {
+                for (int i = 0; i < 30; i++) {
+                    packet->sequence = htonl(tx_sequence++);
+                    memcpy(packet->opus_data, silence_opus, silence_opus_len);
+
+                    const char *target_ip = ha_mqtt_get_target_ip();
+                    if (target_ip) {
+                        network_send_unicast(packet, HEADER_LENGTH + silence_opus_len, target_ip);
+                    } else {
+                        network_send_multicast(packet, HEADER_LENGTH + silence_opus_len);
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(FRAME_DURATION_MS));
+                }
+            }
+
+            was_transmitting = false;
+            continue;
+        }
+
         if (!transmitting) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
