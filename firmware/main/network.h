@@ -39,6 +39,11 @@ esp_err_t network_wait_connected(uint32_t timeout_ms);
 bool network_is_connected(void);
 
 /**
+ * Check if AP mode is active (for configuration).
+ */
+bool network_is_ap_mode(void);
+
+/**
  * Get local IP address as string.
  * @param ip_str Buffer to store IP string (at least 16 bytes)
  */
@@ -77,6 +82,12 @@ esp_err_t network_send_multicast(const audio_packet_t *packet, size_t len);
  * @return ESP_OK on success
  */
 esp_err_t network_send_unicast(const audio_packet_t *packet, size_t len, const char *dest_ip);
+
+/**
+ * Start mDNS service with given hostname.
+ * Device will be accessible at hostname.local
+ */
+esp_err_t network_start_mdns(const char *hostname);
 
 /**
  * Deinitialize network.
