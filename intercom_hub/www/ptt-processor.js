@@ -18,6 +18,11 @@ class PTTProcessor extends AudioWorkletProcessor {
         this.port.onmessage = (event) => {
             if (event.data.type === 'ptt') {
                 this.transmitting = event.data.active;
+                // Clear buffer when stopping - prevents stale audio on next start
+                if (!event.data.active) {
+                    this.buffer = new Float32Array(this.frameSize);
+                    this.bufferIndex = 0;
+                }
             }
         };
     }
