@@ -403,8 +403,8 @@ def encode_and_broadcast(pcm_data):
         silence_pcm = bytes(frame_bytes)
         silence_opus = encoder.encode(silence_pcm, FRAME_SIZE)
 
-        # Lead-in silence (200ms = 10 frames) - lets ESP32 jitter buffer fill
-        for _ in range(10):
+        # Lead-in silence (300ms = 15 frames) - lets ESP32 jitter buffer fully prime
+        for _ in range(15):
             encoded_frames.append(silence_opus)
 
         # Encode actual audio frames
@@ -415,8 +415,8 @@ def encode_and_broadcast(pcm_data):
             encoded_frames.append(opus_data)
             offset += frame_bytes
 
-        # Trail-out silence (400ms = 20 frames) - flush ESP32 DMA buffers
-        for _ in range(20):
+        # Trail-out silence (600ms = 30 frames) - flush all ESP32 DMA buffers
+        for _ in range(30):
             encoded_frames.append(silence_opus)
 
         # === PHASE 2: SEND WITH PRECISE TIMING ===
@@ -499,7 +499,7 @@ def publish_discovery():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.5.0"
+        "sw_version": "1.5.1"
     }
 
     # Notify entity - send text (TTS) or URL to broadcast
@@ -635,7 +635,7 @@ def update_target_select_options():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.5.0"
+        "sw_version": "1.5.1"
     }
 
     options = get_target_options()
@@ -769,7 +769,7 @@ def main():
     global mqtt_client, tx_socket, rx_socket
 
     print("=" * 50)
-    print("Intercom Hub v1.5.0")
+    print("Intercom Hub v1.5.1")
     print(f"Device ID: {DEVICE_ID_STR}")
     print(f"Unique ID: {UNIQUE_ID}")
     print("=" * 50)
