@@ -141,7 +141,7 @@ char* diagnostics_get_logs_html(void)
 
     // Header
     int written = snprintf(p, remaining,
-        "<div class='logs'>"
+        "<div class='logs' id='logbox'>"
         "<style>"
         ".logs { font-family: monospace; font-size: 12px; background: #1a1a1a; color: #eee; padding: 10px; border-radius: 5px; max-height: 400px; overflow-y: auto; }"
         ".log-E { color: #ff6b6b; }"
