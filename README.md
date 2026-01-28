@@ -2,9 +2,7 @@
 
 [![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FBri-J-C%2Fha-intercom)
 
-ESP32-S3 based intercom system with Home Assistant integration.
-
-Inspired by [PTTDroid](https://f-droid.org/en/packages/ro.ui.pttdroid/)'s simple UDP multicast/unicast approach.
+ESP32-S3-DevKitC-1 based intercom system with Home Assistant integration.
 
 ## Features
 
