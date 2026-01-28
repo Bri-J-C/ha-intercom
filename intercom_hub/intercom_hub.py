@@ -110,6 +110,7 @@ web_clients = set()  # Connected WebSocket clients
 web_ptt_active = False  # Is a web client transmitting
 web_ptt_encoder = None  # Opus encoder for web PTT
 web_event_loop = None  # Event loop for async web operations
+web_tx_lock = None  # Async lock to serialize web PTT transmissions (created at runtime)
 INGRESS_PORT = int(os.environ.get('INGRESS_PORT', '8099'))
 WWW_PATH = Path(__file__).parent / 'www'
 
@@ -234,6 +235,15 @@ def receive_thread():
 
     print("Receive thread started")
 
+    # Create Opus decoder for forwarding to web clients
+    rx_decoder = None
+    if opuslib:
+        try:
+            rx_decoder = opuslib.Decoder(SAMPLE_RATE, CHANNELS)
+            print("RX decoder created for web client forwarding")
+        except Exception as e:
+            print(f"Failed to create RX decoder: {e}")
+
     while True:
         try:
             data, addr = rx_socket.recvfrom(1024)
@@ -249,6 +259,7 @@ def receive_thread():
                 continue
 
             sender_id_str = sender_id.hex()
+            opus_frame = data[12:]  # Skip ID (8) + sequence (4)
 
             # Update state to receiving if we weren't already
             now = time.time()
@@ -258,6 +269,15 @@ def receive_thread():
                 print(f"Receiving audio from {sender_id_str}")
 
             last_rx_time = now
+
+            # Decode and forward to web clients
+            if rx_decoder and web_clients and len(opus_frame) > 0:
+                try:
+                    pcm = rx_decoder.decode(opus_frame, FRAME_SIZE)
+                    if pcm:
+                        forward_audio_to_web_clients(pcm)
+                except Exception as e:
+                    pass  # Ignore decode errors
 
         except socket.timeout:
             # Check if we should go back to idle
@@ -515,7 +535,7 @@ def publish_discovery():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.6.1"
+        "sw_version": "1.6.5.6"
     }
 
     # Notify entity - send text (TTS) or URL to broadcast
@@ -633,6 +653,22 @@ def notify_web_clients_state():
         print(f"Error notifying web clients: {e}")
 
 
+def forward_audio_to_web_clients(pcm_data):
+    """Forward audio to web clients (thread-safe)."""
+    global web_event_loop
+
+    if not web_clients or web_event_loop is None:
+        return
+
+    try:
+        asyncio.run_coroutine_threadsafe(
+            broadcast_audio_to_web_clients(pcm_data),
+            web_event_loop
+        )
+    except Exception as e:
+        print(f"Error forwarding audio to web clients: {e}")
+
+
 def publish_volume():
     """Publish current volume."""
     if mqtt_client and mqtt_client.is_connected():
@@ -670,7 +706,7 @@ def update_target_select_options():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.6.1"
+        "sw_version": "1.6.5.6"
     }
 
     options = get_target_options()
@@ -835,6 +871,7 @@ async def websocket_handler(request):
     ptt_target = None
     frame_count = 0
     lead_in_sent = False
+    holding_lock = False  # Track if we hold web_tx_lock
 
     try:
         async for msg in ws:
@@ -861,11 +898,29 @@ async def websocket_handler(request):
                     msg_type = data.get('type')
 
                     if msg_type == 'ptt_start':
-                        if not is_channel_busy() and not web_ptt_active:
+                        # Wait for any previous transmission to finish (including trail-out)
+                        # This queues transmissions like TTS announcements do
+                        if web_tx_lock:
+                            await web_tx_lock.acquire()
+                            holding_lock = True
+
+                        # Check if channel is busy (receiving from ESP32)
+                        if is_channel_busy():
+                            if holding_lock:
+                                web_tx_lock.release()
+                                holding_lock = False
+                            await ws.send_json({'type': 'busy'})
+                        else:
                             ptt_active = True
                             web_ptt_active = True
                             lead_in_sent = False
                             frame_count = 0
+
+                            # Create FRESH encoder for this PTT session
+                            # (critical: encoder state must not carry over between sessions)
+                            if opuslib:
+                                web_ptt_encoder = opuslib.Encoder(SAMPLE_RATE, CHANNELS, opuslib.APPLICATION_VOIP)
+                                web_ptt_encoder.bitrate = OPUS_BITRATE
 
                             # Get target IP
                             target_room = data.get('target', 'all')
@@ -887,24 +942,33 @@ async def websocket_handler(request):
                                 'type': 'state',
                                 'status': 'transmitting'
                             })
-                        else:
-                            await ws.send_json({'type': 'busy'})
 
                     elif msg_type == 'ptt_stop':
                         if ptt_active:
-                            # Send trail-out silence
+                            # Send trail-out silence - encode FRESH each frame
+                            # (keeps codec state flowing naturally to end)
                             if web_ptt_encoder and lead_in_sent:
                                 silence_pcm = bytes(FRAME_SIZE * 2)
-                                silence_opus = web_ptt_encoder.encode(silence_pcm, FRAME_SIZE)
                                 for _ in range(30):  # 600ms trail-out
+                                    silence_opus = web_ptt_encoder.encode(silence_pcm, FRAME_SIZE)
                                     send_audio_packet(silence_opus, ptt_target)
                                     await asyncio.sleep(FRAME_DURATION_MS / 1000.0)
 
                             ptt_active = False
                             web_ptt_active = False
+                            # Reset encoder - prevents state carryover to next session
+                            web_ptt_encoder = None
                             current_state = "idle"
                             publish_state()
                             print(f"Web PTT stopped ({frame_count} frames)")
+
+                            # Gap for ESP32 jitter buffer to drain before next TX
+                            await asyncio.sleep(0.75)
+
+                            # Release lock AFTER trail-out + gap - allows queued TX to start
+                            if holding_lock and web_tx_lock:
+                                web_tx_lock.release()
+                                holding_lock = False
 
                             await broadcast_to_web_clients({
                                 'type': 'state',
@@ -941,6 +1005,10 @@ async def websocket_handler(request):
             current_state = "idle"
             publish_state()
 
+        # Release lock if still held (client disconnected while transmitting)
+        if holding_lock and web_tx_lock:
+            web_tx_lock.release()
+
         web_clients.discard(ws)
         print(f"Web PTT client disconnected ({len(web_clients)} remaining)")
 
@@ -958,6 +1026,18 @@ async def broadcast_to_web_clients(message):
                 await client.send_json(message)
             else:
                 await client.send_bytes(message)
+        except Exception:
+            web_clients.discard(client)
+
+
+async def broadcast_audio_to_web_clients(pcm_data):
+    """Send audio PCM data to all connected web clients."""
+    if not web_clients:
+        return
+
+    for client in web_clients.copy():
+        try:
+            await client.send_bytes(pcm_data)
         except Exception:
             web_clients.discard(client)
 
@@ -997,7 +1077,7 @@ def create_web_app():
 
 async def run_web_server():
     """Run the web server for ingress."""
-    global web_event_loop
+    global web_event_loop, web_tx_lock
 
     if web is None:
         print("Web server not available (aiohttp not installed)")
@@ -1005,6 +1085,9 @@ async def run_web_server():
 
     # Store reference to event loop for thread-safe callbacks
     web_event_loop = asyncio.get_running_loop()
+
+    # Create async lock for serializing web PTT transmissions
+    web_tx_lock = asyncio.Lock()
 
     app = create_web_app()
     runner = web.AppRunner(app)
@@ -1029,7 +1112,7 @@ def main():
     global mqtt_client, tx_socket, rx_socket
 
     print("=" * 50)
-    print("Intercom Hub v1.6.1")
+    print("Intercom Hub v1.6.5.6")
     print(f"Device ID: {DEVICE_ID_STR}")
     print(f"Unique ID: {UNIQUE_ID}")
     print("=" * 50)
