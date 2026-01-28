@@ -1,6 +1,6 @@
 name: "Intercom Hub"
 description: "Multicast intercom hub for HA - enables TTS announcements to ESP32 intercoms"
-version: "1.3.6"
+version: "1.3.7"
 slug: "intercom_hub"
 url: "https://github.com/Bri-J-C/ha-intercom"
 arch:
@@ -9,7 +9,6 @@ arch:
   - armv7
 init: false
 host_network: true
-audio: true
 startup: application
 options:
   mqtt_host: "core-mosquitto"

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.7] - 2026-01-27
+
+### Changed
+- Removed unnecessary `audio: true` permission to improve security rating
+- Updated automation examples to current Home Assistant YAML format
+
 ## [1.3.6] - 2026-01-26
 
 ### Added
