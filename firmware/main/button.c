@@ -204,6 +204,10 @@ void button_set_led_state(led_state_t state)
             xTimerChangePeriod(led_blink_timer, pdMS_TO_TICKS(100), 0);
             xTimerStart(led_blink_timer, 0);
             break;
+
+        case LED_STATE_BUSY:
+            set_led_rgb(64, 32, 0);    // Orange when channel busy
+            break;
     }
 
     ESP_LOGI(TAG, "LED state: %d", state);

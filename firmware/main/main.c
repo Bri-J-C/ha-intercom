@@ -61,6 +61,11 @@ static uint8_t jitter_read_idx = 0;
 static uint8_t jitter_count = 0;
 static bool jitter_primed = false;
 
+// First-to-talk: track current sender to ignore others
+static uint8_t current_sender[DEVICE_ID_LENGTH] = {0};
+static bool has_current_sender = false;
+#define SENDER_TIMEOUT_MS 500  // Release channel after 500ms silence
+
 /**
  * Generate unique device ID from MAC address.
  */
@@ -84,7 +89,25 @@ static void generate_device_id(void)
 }
 
 /**
+ * Check if channel is busy (someone else is transmitting).
+ */
+static bool is_channel_busy(void)
+{
+    if (!has_current_sender) return false;
+
+    // Check if sender timed out
+    uint32_t now = xTaskGetTickCount();
+    uint32_t elapsed = (now - last_audio_rx_time) * portTICK_PERIOD_MS;
+    if (elapsed > SENDER_TIMEOUT_MS) {
+        has_current_sender = false;
+        return false;
+    }
+    return true;
+}
+
+/**
  * Handle received audio packets with jitter buffering.
+ * Implements first-to-talk: locks onto first sender, ignores others.
  */
 static void on_audio_received(const audio_packet_t *packet, size_t total_len)
 {
@@ -98,6 +121,20 @@ static void on_audio_received(const audio_packet_t *packet, size_t total_len)
     // Don't play while transmitting (half-duplex)
     if (transmitting) {
         return;
+    }
+
+    // First-to-talk: if we have a current sender, ignore packets from others
+    if (has_current_sender) {
+        if (memcmp(packet->device_id, current_sender, DEVICE_ID_LENGTH) != 0) {
+            // Different sender - ignore (first-to-talk wins)
+            return;
+        }
+    } else {
+        // No current sender - this sender gets the channel
+        memcpy(current_sender, packet->device_id, DEVICE_ID_LENGTH);
+        has_current_sender = true;
+        ESP_LOGI(TAG, "Channel acquired by %02x%02x%02x%02x",
+                 current_sender[0], current_sender[1], current_sender[2], current_sender[3]);
     }
 
     size_t opus_len = total_len - HEADER_LENGTH;
@@ -209,9 +246,16 @@ static void on_button_event(button_event_t event, bool is_broadcast)
 {
     switch (event) {
         case BUTTON_EVENT_PRESSED:
-            button_set_led_state(LED_STATE_TRANSMITTING);  // Green
-            transmitting = true;
-            ha_mqtt_set_state(HA_STATE_TRANSMITTING);
+            // Check if channel is busy (someone else talking)
+            if (is_channel_busy()) {
+                button_set_led_state(LED_STATE_BUSY);  // Orange - channel busy
+                ESP_LOGW(TAG, "Channel busy - cannot transmit");
+                // Don't set transmitting = true, so TX task won't send
+            } else {
+                button_set_led_state(LED_STATE_TRANSMITTING);  // Green
+                transmitting = true;
+                ha_mqtt_set_state(HA_STATE_TRANSMITTING);
+            }
             break;
 
         case BUTTON_EVENT_LONG_PRESS:
@@ -375,9 +419,10 @@ void app_main(void)
             if ((now - last_audio_rx_time) > pdMS_TO_TICKS(500)) {
                 audio_output_stop();
                 audio_playing = false;
+                has_current_sender = false;  // Release channel
                 button_set_led_state(get_idle_led_state());  // White or red if muted
                 ha_mqtt_set_state(HA_STATE_IDLE);
-                ESP_LOGI(TAG, "RX audio stopped (idle)");
+                ESP_LOGI(TAG, "RX audio stopped (idle), channel released");
             }
         }
 
