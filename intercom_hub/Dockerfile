@@ -19,6 +19,7 @@ RUN pip3 install --no-cache-dir -r /requirements.txt
 # Copy application
 COPY intercom_hub.py /
 COPY run.sh /
+COPY www/ /www/
 
 RUN chmod a+x /run.sh
 

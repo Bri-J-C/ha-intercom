@@ -46,6 +46,7 @@ profile intercom_hub flags=(attach_disconnected,mediate_deleted) {
   /intercom_hub.py r,
   /run.sh rix,
   /requirements.txt r,
+  /www/** r,
 
   # FFmpeg for audio conversion
   /usr/bin/ffmpeg rix,
