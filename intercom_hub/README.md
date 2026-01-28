@@ -100,4 +100,4 @@ mode: single
 
 ## Version
 
-1.3.0
+1.3.7
