@@ -26,6 +26,7 @@
 #include "webserver.h"
 #include "ha_mqtt.h"
 #include "diagnostics.h"
+#include "display.h"
 
 static const char *TAG = "main";
 
@@ -65,6 +66,9 @@ static bool jitter_primed = false;
 static uint8_t current_sender[DEVICE_ID_LENGTH] = {0};
 static bool has_current_sender = false;
 #define SENDER_TIMEOUT_MS 500  // Release channel after 500ms silence
+
+// Display room list tracking
+static int last_device_count = -1;
 
 /**
  * Generate unique device ID from MAC address.
@@ -158,7 +162,8 @@ static void on_audio_received(const audio_packet_t *packet, size_t total_len)
         jitter_count = 0;
         jitter_write_idx = 0;
         jitter_read_idx = 0;
-        button_set_led_state(LED_STATE_RECEIVING);  // Blue LED
+        button_set_led_state(LED_STATE_RECEIVING);  // Green LED
+        display_set_state(DISPLAY_STATE_RECEIVING);
         ha_mqtt_set_state(HA_STATE_RECEIVING);
         ESP_LOGI(TAG, "RX audio started (buffering)");
     }
@@ -312,10 +317,13 @@ static void on_button_event(button_event_t event, bool is_broadcast)
             // Check if channel is busy (someone else talking)
             if (is_channel_busy()) {
                 button_set_led_state(LED_STATE_BUSY);  // Orange - channel busy
+                display_set_state(DISPLAY_STATE_ERROR);
+                display_show_message("Channel Busy", 1000);
                 ESP_LOGW(TAG, "Channel busy - cannot transmit");
                 // Don't set transmitting = true, so TX task won't send
             } else {
-                button_set_led_state(LED_STATE_TRANSMITTING);  // Green
+                button_set_led_state(LED_STATE_TRANSMITTING);  // Cyan
+                display_set_state(DISPLAY_STATE_TRANSMITTING);
                 transmitting = true;
                 ha_mqtt_set_state(HA_STATE_TRANSMITTING);
             }
@@ -326,6 +334,7 @@ static void on_button_event(button_event_t event, bool is_broadcast)
 
         case BUTTON_EVENT_RELEASED:
             button_set_led_state(get_idle_led_state());  // White or red if muted
+            display_set_state(DISPLAY_STATE_IDLE);
             transmitting = false;
             ha_mqtt_set_state(HA_STATE_IDLE);
             break;
@@ -369,6 +378,16 @@ void app_main(void)
     // Initialize button and LED
     ESP_ERROR_CHECK(button_init());
     button_set_callback(on_button_event);
+
+    // Initialize display (optional - continues if not found)
+    esp_err_t disp_ret = display_init();
+    if (disp_ret == ESP_OK) {
+        ESP_LOGI(TAG, "Display initialized");
+    } else if (disp_ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGI(TAG, "No display detected - running without");
+    } else {
+        ESP_LOGW(TAG, "Display init failed: %s", esp_err_to_name(disp_ret));
+    }
 
     // Initialize audio codec and I/O
     ESP_ERROR_CHECK(codec_init());
@@ -484,8 +503,56 @@ void app_main(void)
                 audio_playing = false;
                 has_current_sender = false;  // Release channel
                 button_set_led_state(get_idle_led_state());  // White or red if muted
+                display_set_state(DISPLAY_STATE_IDLE);
                 ha_mqtt_set_state(HA_STATE_IDLE);
                 ESP_LOGI(TAG, "RX audio stopped (idle), channel released");
+            }
+        }
+
+        // Update display room list when new devices are discovered or availability changes
+        if (display_is_available()) {
+            int device_count = ha_mqtt_get_device_count();
+            bool avail_changed = ha_mqtt_availability_changed();
+            if (device_count != last_device_count || avail_changed) {
+                last_device_count = device_count;
+
+                // Build room list: "All Rooms" + discovered devices (excluding self)
+                room_target_t room_list[MAX_ROOMS];
+                int room_idx = 0;
+
+                // First entry is always "All Rooms" (multicast)
+                strncpy(room_list[room_idx].name, "All Rooms", MAX_ROOM_NAME_LEN - 1);
+                strncpy(room_list[room_idx].ip, MULTICAST_GROUP, 15);
+                room_list[room_idx].is_multicast = true;
+                room_idx++;
+
+                // Add discovered devices (excluding self and unavailable)
+                for (int i = 0; i < device_count && room_idx < MAX_ROOMS; i++) {
+                    // Skip self and unavailable devices
+                    if (ha_mqtt_is_self(i)) continue;
+                    if (!ha_mqtt_is_available(i)) continue;
+
+                    char room[32], ip[16];
+                    if (ha_mqtt_get_device(i, room, ip)) {
+                        strncpy(room_list[room_idx].name, room, MAX_ROOM_NAME_LEN - 1);
+                        strncpy(room_list[room_idx].ip, ip, 15);
+                        room_list[room_idx].is_multicast = false;
+                        room_idx++;
+                    }
+                }
+
+                display_set_rooms(room_list, room_idx);
+                ESP_LOGI(TAG, "Display room list updated: %d rooms", room_idx);
+            }
+
+            // Sync display selection with MQTT target when cycle button changes it
+            const room_target_t *selected = display_get_selected_room();
+            if (selected) {
+                const char *mqtt_target = ha_mqtt_get_target_name();
+                if (strcmp(selected->name, mqtt_target) != 0) {
+                    // Display selection changed - update MQTT
+                    ha_mqtt_set_target(selected->name);
+                }
             }
         }
 

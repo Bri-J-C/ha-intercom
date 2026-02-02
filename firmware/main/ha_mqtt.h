@@ -98,4 +98,45 @@ const char* ha_mqtt_get_target_name(void);
  */
 void ha_mqtt_process(void);
 
+/**
+ * Get discovered device count.
+ */
+int ha_mqtt_get_device_count(void);
+
+/**
+ * Get discovered device info by index.
+ * @param index Device index (0 to count-1)
+ * @param room Buffer for room name (min 32 bytes)
+ * @param ip Buffer for IP address (min 16 bytes)
+ * @return true if device exists
+ */
+bool ha_mqtt_get_device(int index, char *room, char *ip);
+
+/**
+ * Check if discovered device at index is this device (self).
+ * @param index Device index (0 to count-1)
+ * @return true if device is self
+ */
+bool ha_mqtt_is_self(int index);
+
+/**
+ * Check if discovered device at index is available (online).
+ * @param index Device index (0 to count-1)
+ * @return true if device is online
+ */
+bool ha_mqtt_is_available(int index);
+
+/**
+ * Check if device availability has changed (and clear the flag).
+ * Use this to trigger display refresh when devices go online/offline.
+ * @return true if availability changed since last check
+ */
+bool ha_mqtt_availability_changed(void);
+
+/**
+ * Set target by room name (called from display cycle).
+ * This updates both local target and publishes to MQTT.
+ */
+void ha_mqtt_set_target(const char *room_name);
+
 #endif // HA_MQTT_H

@@ -42,6 +42,9 @@ logging.basicConfig(
 )
 log = logging.getLogger('intercom_hub')
 
+# Version - single source of truth
+VERSION = "1.8.9"
+
 try:
     from aiohttp import web
 except ImportError:
@@ -129,6 +132,48 @@ web_event_loop = None  # Event loop for async web operations
 web_tx_lock = None  # Async lock to serialize web PTT transmissions (created at runtime)
 INGRESS_PORT = int(os.environ.get('INGRESS_PORT', '8099'))
 WWW_PATH = Path(__file__).parent / 'www'
+
+# Web client MQTT topics
+WEB_CLIENT_INFO_TOPIC = f"intercom/devices/{UNIQUE_ID}_web/info"
+WEB_CLIENT_STATUS_TOPIC = f"intercom/{UNIQUE_ID}_web/status"
+
+
+def get_local_ip():
+    """Get the local IP address of this machine."""
+    try:
+        # Create a socket to determine our IP (doesn't actually connect)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def publish_web_client_info():
+    """Publish web client as a discoverable target via MQTT."""
+    if not mqtt_client or not mqtt_client.is_connected():
+        return
+
+    if not web_clients:
+        # No web clients - clear device info (status will show offline via retained msg)
+        mqtt_client.publish(WEB_CLIENT_INFO_TOPIC, "", retain=True)
+        mqtt_client.publish(WEB_CLIENT_STATUS_TOPIC, "offline", retain=True)
+        log.info("WebClients disconnected")
+        return
+
+    # Publish web client info and online status
+    info = {
+        "room": "WebClients",
+        "ip": get_local_ip(),
+        "id": f"{UNIQUE_ID}_web"
+    }
+    payload = json.dumps(info, separators=(',', ':'))  # No spaces - ESP32 parser expects this
+    # Publish online status FIRST to ensure it's retained before device info arrives
+    mqtt_client.publish(WEB_CLIENT_STATUS_TOPIC, "online", retain=True)
+    mqtt_client.publish(WEB_CLIENT_INFO_TOPIC, payload, retain=True)
+    log.info(f"WebClients online: {payload}")
 
 
 def create_tx_socket():
@@ -551,7 +596,7 @@ def publish_discovery():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.8.4"
+        "sw_version": VERSION
     }
 
     # Notify entity - send text (TTS) or URL to broadcast
@@ -722,7 +767,7 @@ def update_target_select_options():
         "name": DEVICE_NAME,
         "model": "Intercom Hub",
         "manufacturer": "guywithacomputer",
-        "sw_version": "1.8.4"
+        "sw_version": VERSION
     }
 
     options = get_target_options()
@@ -868,14 +913,18 @@ async def websocket_handler(request):
     web_clients.add(ws)
     log.info(f"Web PTT client connected ({len(web_clients)} total)")
 
+    # Publish web client as discoverable target
+    publish_web_client_info()
+
     # Create encoder for this session if needed
     if opuslib and web_ptt_encoder is None:
         web_ptt_encoder = opuslib.Encoder(SAMPLE_RATE, CHANNELS, opuslib.APPLICATION_VOIP)
         web_ptt_encoder.bitrate = OPUS_BITRATE
 
-    # Send current state and target list
+    # Send current state, version, and target list
     await ws.send_json({
-        'type': 'state',
+        'type': 'init',
+        'version': VERSION,
         'status': current_state
     })
     await ws.send_json({
@@ -1028,6 +1077,9 @@ async def websocket_handler(request):
         web_clients.discard(ws)
         log.info(f"Web PTT client disconnected ({len(web_clients)} remaining)")
 
+        # Update web client discovery (remove if no clients left)
+        publish_web_client_info()
+
     return ws
 
 
@@ -1061,7 +1113,9 @@ async def broadcast_audio_to_web_clients(pcm_data):
 async def index_handler(request):
     """Serve the main PTT page."""
     log.debug(f"Index request: {request.path}")
-    return web.FileResponse(WWW_PATH / 'index.html')
+    response = web.FileResponse(WWW_PATH / 'index.html')
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
 
 
 async def static_handler(request):
@@ -1071,7 +1125,11 @@ async def static_handler(request):
     log.debug(f"Static request: {request.path} -> {filepath}")
 
     if filepath.exists() and filepath.is_file():
-        return web.FileResponse(filepath)
+        response = web.FileResponse(filepath)
+        # Prevent caching for HTML/JS to ensure updates are seen
+        if filename.endswith(('.html', '.js')):
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        return response
     else:
         log.warning(f"File not found: {filepath}")
         raise web.HTTPNotFound()
@@ -1128,7 +1186,7 @@ def main():
     global mqtt_client, tx_socket, rx_socket
 
     log.info("=" * 50)
-    log.info("Intercom Hub v1.8.4")
+    log.info(f"Intercom Hub v{VERSION}")
     log.info(f"Device ID: {DEVICE_ID_STR}")
     log.info(f"Unique ID: {UNIQUE_ID}")
     log.info(f"Log level: {LOG_LEVEL}")
