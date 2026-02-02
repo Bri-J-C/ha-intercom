@@ -11,6 +11,7 @@ idf_component_register(
         "webserver.c"
         "ha_mqtt.c"
         "diagnostics.c"
+        "display.c"
     INCLUDE_DIRS
         "."
     REQUIRES
