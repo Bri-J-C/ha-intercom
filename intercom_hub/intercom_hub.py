@@ -43,7 +43,7 @@ logging.basicConfig(
 log = logging.getLogger('intercom_hub')
 
 # Version - single source of truth
-VERSION = "1.8.9"
+VERSION = "1.9.0"
 
 try:
     from aiohttp import web
@@ -929,7 +929,7 @@ async def websocket_handler(request):
     })
     await ws.send_json({
         'type': 'targets',
-        'rooms': sorted(set(d['room'] for d in discovered_devices.values()))
+        'rooms': sorted(set(d['room'] for d in discovered_devices.values() if d['room'] != 'WebClients'))
     })
 
     ptt_active = False
@@ -1047,7 +1047,7 @@ async def websocket_handler(request):
                         })
                         await ws.send_json({
                             'type': 'targets',
-                            'rooms': sorted(set(d['room'] for d in discovered_devices.values()))
+                            'rooms': sorted(set(d['room'] for d in discovered_devices.values() if d['room'] != 'WebClients'))
                         })
 
                     elif msg_type == 'set_target':
