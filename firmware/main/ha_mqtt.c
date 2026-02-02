@@ -34,6 +34,7 @@ typedef struct {
     char ip[16];
     char id[32];
     bool active;
+    bool available;  // Online/offline status from LWT
 } discovered_device_t;
 
 static discovered_device_t discovered_devices[MAX_DISCOVERED_DEVICES];
@@ -54,6 +55,7 @@ static char device_info_topic[64];
 static char target_state_topic[64];
 static char target_cmd_topic[64];
 static const char *device_discovery_topic = "intercom/devices/+/info";
+static const char *device_status_topic = "intercom/+/status";  // For availability tracking
 
 // Callback for settings changes from HA
 static ha_mqtt_callback_t user_callback = NULL;
@@ -415,6 +417,7 @@ static void publish_target_discovery(void)
 
 // Flag for deferred target discovery update
 static bool target_discovery_pending = false;
+static bool availability_changed = false;  // Flag to trigger display refresh
 
 /**
  * Simple JSON string extractor (avoids cJSON allocation in MQTT handler).
@@ -469,17 +472,51 @@ static void handle_device_info(const char *payload)
         strncpy(discovered_devices[existing_idx].room, room, sizeof(discovered_devices[0].room) - 1);
         strncpy(discovered_devices[existing_idx].ip, ip, sizeof(discovered_devices[0].ip) - 1);
         discovered_devices[existing_idx].active = true;
+        discovered_devices[existing_idx].available = true;  // Assume online if we're getting their info
     } else if (discovered_count < MAX_DISCOVERED_DEVICES) {
         // Add new device
         strncpy(discovered_devices[discovered_count].room, room, sizeof(discovered_devices[0].room) - 1);
         strncpy(discovered_devices[discovered_count].ip, ip, sizeof(discovered_devices[0].ip) - 1);
         strncpy(discovered_devices[discovered_count].id, id, sizeof(discovered_devices[0].id) - 1);
         discovered_devices[discovered_count].active = true;
+        discovered_devices[discovered_count].available = true;  // Assume online if we're getting their info
         discovered_count++;
         ESP_LOGI(TAG, "Discovered device: %s (%s) at %s", room, id, ip);
 
         // Defer target discovery update to main loop (avoid cJSON in MQTT handler)
         target_discovery_pending = true;
+    }
+}
+
+/**
+ * Handle device status (availability) message.
+ * Topic format: intercom/{unique_id}/status
+ * Payload: "online" or "offline"
+ */
+static void handle_device_status(const char *topic, const char *payload)
+{
+    // Extract unique_id from topic: "intercom/{unique_id}/status"
+    const char *start = topic + 9;  // Skip "intercom/"
+    const char *end = strstr(start, "/status");
+    if (!end) return;
+
+    char device_id[32] = {0};
+    size_t len = end - start;
+    if (len >= sizeof(device_id)) len = sizeof(device_id) - 1;
+    memcpy(device_id, start, len);
+
+    bool is_online = (strcmp(payload, "online") == 0);
+
+    // Find device and update availability
+    for (int i = 0; i < discovered_count; i++) {
+        if (strcmp(discovered_devices[i].id, device_id) == 0) {
+            if (discovered_devices[i].available != is_online) {
+                discovered_devices[i].available = is_online;
+                availability_changed = true;  // Trigger display refresh
+                ESP_LOGI(TAG, "Device %s is now %s", discovered_devices[i].room, is_online ? "online" : "offline");
+            }
+            return;
+        }
     }
 }
 
@@ -498,11 +535,14 @@ static void handle_mqtt_data(esp_mqtt_event_handle_t event)
     memcpy(topic, event->topic, topic_len);
     memcpy(data, event->data, data_len);
 
-    // Check if this is device info (don't log these to reduce spam)
+    // Check if this is device info or status (don't log these to reduce spam)
     bool is_device_info = (strncmp(topic, "intercom/devices/", 17) == 0 &&
                            strstr(topic, "/info") != NULL);
+    bool is_device_status = (strncmp(topic, "intercom/", 9) == 0 &&
+                             strstr(topic, "/status") != NULL &&
+                             strncmp(topic, "intercom/devices/", 17) != 0);
 
-    if (!is_device_info) {
+    if (!is_device_info && !is_device_status) {
         ESP_LOGI(TAG, "MQTT cmd: %s = %s", topic, data);
     }
 
@@ -563,6 +603,10 @@ static void handle_mqtt_data(esp_mqtt_event_handle_t event)
     else if (is_device_info) {
         handle_device_info(data);
     }
+    // Device status (availability) from other intercoms
+    else if (is_device_status) {
+        handle_device_status(topic, data);
+    }
 }
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
@@ -589,7 +633,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
             // Subscribe to device discovery to learn about other intercoms
             esp_mqtt_client_subscribe(mqtt_client, device_discovery_topic, 0);
-            ESP_LOGI(TAG, "Subscribed to command topics and device discovery");
+            esp_mqtt_client_subscribe(mqtt_client, device_status_topic, 0);
+            ESP_LOGI(TAG, "Subscribed to command topics, device discovery, and status");
 
             // Publish current states
             publish_all_states();
@@ -669,6 +714,7 @@ esp_err_t ha_mqtt_start(void)
         .session.last_will.msg = "offline",
         .session.last_will.qos = 1,
         .session.last_will.retain = true,
+        .session.keepalive = 15,  // 15 seconds - faster offline detection
     };
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -768,4 +814,56 @@ const char* ha_mqtt_get_target_ip(void)
 const char* ha_mqtt_get_target_name(void)
 {
     return current_target;
+}
+
+int ha_mqtt_get_device_count(void)
+{
+    return discovered_count;
+}
+
+bool ha_mqtt_get_device(int index, char *room, char *ip)
+{
+    if (index < 0 || index >= discovered_count) return false;
+    if (!discovered_devices[index].active) return false;
+
+    if (room) {
+        strncpy(room, discovered_devices[index].room, 31);
+        room[31] = '\0';
+    }
+    if (ip) {
+        strncpy(ip, discovered_devices[index].ip, 15);
+        ip[15] = '\0';
+    }
+    return true;
+}
+
+bool ha_mqtt_is_self(int index)
+{
+    if (index < 0 || index >= discovered_count) return false;
+    return strcmp(discovered_devices[index].id, unique_id) == 0;
+}
+
+bool ha_mqtt_is_available(int index)
+{
+    if (index < 0 || index >= discovered_count) return false;
+    return discovered_devices[index].available;
+}
+
+bool ha_mqtt_availability_changed(void)
+{
+    if (availability_changed) {
+        availability_changed = false;
+        return true;
+    }
+    return false;
+}
+
+void ha_mqtt_set_target(const char *room_name)
+{
+    if (!room_name) return;
+
+    strncpy(current_target, room_name, sizeof(current_target) - 1);
+    current_target[sizeof(current_target) - 1] = '\0';
+    publish_target();
+    ESP_LOGI(TAG, "Target set to: %s", current_target);
 }
