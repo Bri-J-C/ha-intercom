@@ -21,6 +21,8 @@ PlatformIO-based firmware for the intercom satellite nodes.
 - Mobile device detection in room list
 - PSRAM support (decoder + audio buffers in PSRAM when available)
 - Lead-in/trail-out silence frames for clean audio start/stop
+- mDNS reliability fixes: initialized before WiFi connect, re-enabled on reconnect via `MDNS_EVENT_ENABLE_IP4`, disabled on disconnect, 60-second periodic re-announcement as safety net
+- DHCP hostname registration via `esp_netif_set_hostname()` so routers display the correct device name
 
 ## Hardware Requirements
 
