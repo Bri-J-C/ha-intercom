@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 // Firmware version - bump with every firmware change
-#define FIRMWARE_VERSION        "2.7.0"
+#define FIRMWARE_VERSION        "2.7.1"
 
 // Network Configuration
 #define CONTROL_PORT        5004

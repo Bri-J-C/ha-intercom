@@ -13,7 +13,7 @@ A Home Assistant add-on that acts as the central hub for the HA Intercom system 
 - **Mobile device support** — Auto-discovery from HA companion apps
 - **TTS announcements** — Via Piper text-to-speech with channel-busy waiting
 - **MQTT auto-discovery** — Devices appear automatically in Home Assistant
-- **Lovelace PTT card** — Custom card for HA dashboards (`intercom-ptt-card.js`)
+- **Lovelace PTT card** — Custom card for HA dashboards (`intercom-ptt-card.js` v1.2.0) with ingress and direct WebSocket modes
 - **Thread-safe state** — Concurrent client handling with proper locking
 
 ## Installation
@@ -81,7 +81,7 @@ data:
 
 ### Lovelace PTT Card
 
-Add the custom Lovelace card for dashboard integration:
+Add the custom Lovelace card (v1.2.0) for dashboard integration:
 
 1. Copy `intercom-ptt-card.js` to your HA `www/` directory
 2. Add as a resource in **Settings → Dashboards → Resources**:
@@ -91,6 +91,15 @@ Add the custom Lovelace card for dashboard integration:
    ```yaml
    type: custom:intercom-ptt-card
    ```
+
+The card connects to the hub via HA ingress by default (no extra configuration needed when accessed through the HA frontend). For direct LAN access outside of HA, add the optional `hub_url` option:
+
+```yaml
+type: custom:intercom-ptt-card
+hub_url: "ws://10.0.0.8:8099/ws"   # Optional: bypass ingress, connect directly
+```
+
+**v1.2.0 changes:** Fixed ingress WebSocket connection to use the add-on's stable ingress entry path (from `/addons/{slug}/info`) and set the ingress session cookie with the correct format matching the HA frontend (including the conditional `Secure` flag for HTTPS). Added `hub_url` direct connection option, inline SVG logo on the init overlay, centered header title via CSS grid, and card version indicator on the init overlay.
 
 ### Automations
 
@@ -140,6 +149,10 @@ mode: single
 - Individual client IDs prevent state cross-contamination between web clients
 - First-to-talk collision avoidance with 500ms timeout
 
-## Version
+## Versions
 
-2.2.0
+| Component | Version |
+|-----------|---------|
+| Hub Python (`intercom_hub.py`) | 2.2.0 |
+| Hub Add-on (`config.yaml`) | 2.1.0 |
+| Lovelace PTT Card (`intercom-ptt-card.js`) | 1.2.0 |

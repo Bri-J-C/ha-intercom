@@ -9,7 +9,7 @@ ESP32-S3-based multi-room intercom system with Home Assistant integration.
 - **Push-to-talk** intercom between rooms with first-to-talk collision avoidance
 - **Multicast** for broadcast to all rooms, **unicast** for room-to-room
 - **Web PTT** browser-based push-to-talk via Home Assistant ingress
-- **Lovelace PTT card** for seamless HA dashboard integration
+- **Lovelace PTT card** for seamless HA dashboard integration (ingress or direct `hub_url` connection)
 - **OLED display** with room selector, settings page, and availability tracking
 - **Priority levels** (Normal, High, Emergency) with preemption
 - **Do Not Disturb** mode with emergency override
@@ -19,6 +19,8 @@ ESP32-S3-based multi-room intercom system with Home Assistant integration.
 - **AEC** (Acoustic Echo Cancellation) via ESP-SR
 - **AES-256-GCM encryption** for stored credentials (WiFi, MQTT, web passwords)
 - **OTA firmware updates** via web interface
+- **Reliable mDNS** with automatic re-enable on WiFi reconnect and 60-second periodic re-announcement
+- **DHCP hostname** registration so routers display the correct device name
 - **Mobile device** auto-discovery and notification routing
 - **TTS announcements** via Piper text-to-speech
 - **Home Assistant integration** with MQTT auto-discovery, services, and automations

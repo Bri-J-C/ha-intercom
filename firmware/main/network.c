@@ -15,6 +15,7 @@
 #include "esp_mac.h"
 #include "nvs_flash.h"
 #include "mdns.h"
+#include "freertos/timers.h"
 #include "lwip/sockets.h"
 #include "lwip/igmp.h"
 #include <string.h>
@@ -36,6 +37,10 @@ static TaskHandle_t rx_task_handle = NULL;
 static network_rx_callback_t rx_callback = NULL;
 static bool rx_running = false;
 
+// mDNS periodic re-announcement timer
+static TimerHandle_t mdns_reannounce_timer = NULL;
+#define MDNS_REANNOUNCE_INTERVAL_MS 60000
+
 // TX packet statistics
 static uint32_t tx_packets_sent = 0;
 static uint32_t tx_packets_failed = 0;
@@ -43,6 +48,15 @@ static int tx_last_errno = 0;
 
 // Forward declaration
 static void start_ap_mode(void);
+
+// Periodic mDNS re-announcement (safety net for missed events)
+static void mdns_reannounce_timer_cb(TimerHandle_t timer)
+{
+    if (wifi_connected && sta_netif) {
+        mdns_netif_action(sta_netif, MDNS_EVENT_ANNOUNCE_IP4);
+        ESP_LOGD(TAG, "mDNS periodic re-announce");
+    }
+}
 
 // WiFi event handler
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -56,6 +70,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                 break;
             case WIFI_EVENT_STA_DISCONNECTED:
                 wifi_connected = false;
+                // Disable mDNS on this interface while disconnected
+                if (sta_netif) {
+                    mdns_netif_action(sta_netif, MDNS_EVENT_DISABLE_IP4);
+                }
                 connection_retries++;
                 if (connection_retries >= MAX_RETRIES && !ap_mode_active) {
                     ESP_LOGW(TAG, "WiFi connection failed after %d attempts, starting AP mode", MAX_RETRIES);
@@ -78,6 +96,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         wifi_connected = true;
         connection_retries = 0;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&local_ip));
+
+        // Re-enable mDNS on this interface after WiFi reconnect
+        // ENABLE_IP4 (not ANNOUNCE_IP4) is needed because DISABLE_IP4
+        // on disconnect tears down the PCB — ANNOUNCE only works on a running PCB
+        if (sta_netif) {
+            mdns_netif_action(sta_netif, MDNS_EVENT_ENABLE_IP4);
+            ESP_LOGI(TAG, "mDNS re-enabled after IP obtained");
+        }
     }
 }
 
@@ -410,6 +436,18 @@ esp_err_t network_send_unicast(const audio_packet_t *packet, size_t len, const c
     return ESP_OK;
 }
 
+esp_err_t network_set_hostname(const char *hostname)
+{
+    if (!sta_netif) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = esp_netif_set_hostname(sta_netif, hostname);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set DHCP hostname: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "DHCP hostname set to: %s", hostname);
+    }
+    return err;
+}
+
 esp_err_t network_start_mdns(const char *hostname)
 {
     esp_err_t err = mdns_init();
@@ -433,6 +471,16 @@ esp_err_t network_start_mdns(const char *hostname)
     // Advertise HTTP service
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
 
+    // Start periodic re-announcement timer (safety net for missed events)
+    if (!mdns_reannounce_timer) {
+        mdns_reannounce_timer = xTimerCreate("mdns_reann",
+            pdMS_TO_TICKS(MDNS_REANNOUNCE_INTERVAL_MS),
+            pdTRUE, NULL, mdns_reannounce_timer_cb);
+        if (mdns_reannounce_timer) {
+            xTimerStart(mdns_reannounce_timer, 0);
+        }
+    }
+
     ESP_LOGI(TAG, "mDNS started: %s.local", hostname);
     return ESP_OK;
 }
@@ -446,6 +494,11 @@ void network_get_tx_stats(uint32_t *sent, uint32_t *failed, int *last_errno)
 
 void network_deinit(void)
 {
+    if (mdns_reannounce_timer) {
+        xTimerStop(mdns_reannounce_timer, 0);
+        xTimerDelete(mdns_reannounce_timer, 0);
+        mdns_reannounce_timer = NULL;
+    }
     mdns_free();
     network_stop_rx();
 
