@@ -20,13 +20,19 @@ SAMPLE_RATE = 16000      # 16kHz
 CHANNELS = 1             # Mono
 FRAME_DURATION_MS = 20   # 20ms frames
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)  # 320 samples
-OPUS_BITRATE = 24000     # 24kbps for voice
+OPUS_BITRATE = 32000     # 32kbps VBR — matches protocol.h and intercom_hub.py
 
 # Protocol Configuration
 HEARTBEAT_INTERVAL = 30  # seconds
 DEVICE_ID_LENGTH = 8     # bytes
 SEQUENCE_LENGTH = 4      # bytes
-HEADER_LENGTH = DEVICE_ID_LENGTH + SEQUENCE_LENGTH  # 12 bytes
+PRIORITY_LENGTH = 1      # bytes (added in v2.5.0)
+HEADER_LENGTH = DEVICE_ID_LENGTH + SEQUENCE_LENGTH + PRIORITY_LENGTH  # 13 bytes
+
+# Priority levels (must match firmware protocol.h)
+PRIORITY_NORMAL = 0    # Default PTT, first-to-talk
+PRIORITY_HIGH = 1      # Override normal transmissions
+PRIORITY_EMERGENCY = 2  # Override all, bypass DND, force max volume
 
 
 class MessageType(IntEnum):
@@ -46,22 +52,31 @@ class CastType(IntEnum):
 
 @dataclass
 class AudioPacket:
-    """Audio packet structure."""
-    device_id: bytes      # 8 bytes
-    sequence: int         # uint32
-    opus_data: bytes      # Variable length
+    """Audio packet structure (v2.5.0+: 13-byte header)."""
+    device_id: bytes         # 8 bytes
+    sequence: int            # uint32
+    opus_data: bytes         # Variable length
+    priority: int = PRIORITY_NORMAL  # uint8 (added in v2.5.0)
 
     def pack(self) -> bytes:
-        """Pack packet for transmission."""
-        return self.device_id + struct.pack(">I", self.sequence) + self.opus_data
+        """Pack packet for transmission (includes priority byte)."""
+        return (self.device_id
+                + struct.pack(">IB", self.sequence, self.priority)
+                + self.opus_data)
 
     @classmethod
     def unpack(cls, data: bytes) -> "AudioPacket":
-        """Unpack received packet."""
+        """Unpack received packet. Handles both old (12-byte) and new (13-byte) headers."""
         device_id = data[:DEVICE_ID_LENGTH]
-        sequence = struct.unpack(">I", data[DEVICE_ID_LENGTH:HEADER_LENGTH])[0]
-        opus_data = data[HEADER_LENGTH:]
-        return cls(device_id=device_id, sequence=sequence, opus_data=opus_data)
+        sequence = struct.unpack(">I", data[DEVICE_ID_LENGTH:DEVICE_ID_LENGTH + SEQUENCE_LENGTH])[0]
+        if len(data) >= HEADER_LENGTH:
+            priority = data[DEVICE_ID_LENGTH + SEQUENCE_LENGTH]
+            opus_data = data[HEADER_LENGTH:]
+        else:
+            # Old firmware: no priority byte
+            priority = PRIORITY_NORMAL
+            opus_data = data[DEVICE_ID_LENGTH + SEQUENCE_LENGTH:]
+        return cls(device_id=device_id, sequence=sequence, opus_data=opus_data, priority=priority)
 
 
 @dataclass
