@@ -36,13 +36,13 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 ### Key Protocol Details
 - **Audio codec**: Opus at 32kbps, 16kHz mono, 20ms frames (320 samples)
 - **Transport**: UDP multicast (224.0.0.100:5005) for broadcast, unicast for targeted rooms
-- **Packet format**: 8-byte device_id + 4-byte sequence + variable Opus data
+- **Packet format**: 8-byte device_id + 4-byte sequence + 1-byte priority + variable Opus data (13-byte header)
 - **Control plane**: MQTT via Home Assistant broker
 - **Web clients**: WebSocket (binary PCM, JSON control messages)
 - **Collision avoidance**: First-to-talk with 500ms timeout
 
 ### intercom_hub/ (Home Assistant Add-on, Python)
-- `intercom_hub.py` (v1.32.0): Main hub server
+- `intercom_hub.py` (v2.2.0): Main hub server
   - MQTT client for HA integration (auto-discovery, state sync, volume/mute/target control)
   - WebSocket server for web PTT clients (individual client tracking with client IDs)
   - Audio routing: ESP32<->ESP32, ESP32<->WebClient, WebClient<->WebClient, TTS->all
@@ -100,18 +100,23 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 - **PSRAM config**: `sdkconfig.esp32s3` controls PSRAM (not just `sdkconfig.defaults`). After sdkconfig changes, run `pio run -t fullclean` before building
 - **Encryption**: WiFi/MQTT/Web/AP passwords are AES-256-GCM encrypted in NVS. Key derived from eFuse MAC + salt via SHA-256. Backwards compatible with plaintext
 
-## Current Features (v1.32.0 hub / v2.1.0 firmware)
+## Current Features (v2.2.0 hub / v2.7.0 firmware)
 
 ### ESP32 Firmware
 - Push-to-talk via BOOT button with first-to-talk collision avoidance
 - Opus codec (32kbps VBR, complexity 5, PLC + FEC for packet loss)
+- Priority levels: Normal, High, Emergency (with preemption)
+- Do Not Disturb mode with emergency override
+- AGC (Automatic Gain Control) for consistent mic levels
+- AEC (Acoustic Echo Cancellation) via ESP-SR
 - OLED room selector with cycle button (short press = next room, long press = call)
+- OLED settings page (DND, Priority, Mute, Volume, AGC, LED toggle)
 - Availability tracking (online/offline per device via MQTT LWT)
 - Mobile device detection in room list
-- WS2812 LED states: white=idle, cyan=TX, green=RX, red=muted, orange=busy
+- WS2812 LED states: white=idle, cyan=TX, green=RX, red=muted, orange=busy, purple=DND
 - Incoming call chime with LED flash
 - Lead-in/trail-out silence frames for clean audio start/stop
-- PSRAM support (Opus encoder/decoder + audio buffers in PSRAM if available)
+- PSRAM support (decoder + audio buffers in PSRAM; encoder in internal RAM)
 - AES-256-GCM credential encryption in NVS
 - Web config portal + OTA updates
 - WiFi AP fallback mode for initial setup
@@ -119,11 +124,14 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 ### Hub Add-on
 - WebSocket-based Web PTT with individual client IDs and registration
 - Per-client state tracking (prevents all clients showing same state)
+- Priority routing with preemption support
+- DND awareness with emergency override
 - Audio forwarding: ESP32<->Web, Web<->Web, TTS->Web+ESP32
 - Mobile device auto-discovery from HA companion apps
 - TTS with channel-busy waiting
-- Call/notify between all node types
+- Call/notify between all node types (ESP32, web, mobile)
 - Room selector dropdown with all discovered devices
+- Custom Lovelace PTT card (intercom-ptt-card.js)
 
 ### Web PTT (Browser)
 - Gradient-themed UI with PTT button and call button
@@ -137,10 +145,9 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 ## Pending Enhancement Tasks
 
 ### Active (to implement)
-1. **AEC (Echo Cancellation)** - ESP-SR library integration for acoustic echo cancellation. Reference: n-IA-hane/intercom-api esp_aec component
-2. **DSP Audio Pipeline** - Biquad filters (noise gate, HPF, compressor, voice EQ) using ESP-DSP library between decode and I2S output
-3. **APLL Playback Rate Correction** - Hardware clock tuning to prevent audio drift during long streams. Reference: jorgenkraghjakobsen/snapclient
-4. **ES8311 Codec Support** - Single-bus I2S duplex for integrated codecs. Requires hardware
+1. **DSP Audio Pipeline** - Biquad filters (noise gate, HPF, compressor, voice EQ) using ESP-DSP library between decode and I2S output
+2. **APLL Playback Rate Correction** - Hardware clock tuning to prevent audio drift during long streams. Reference: jorgenkraghjakobsen/snapclient
+3. **ES8311 Codec Support** - Single-bus I2S duplex for integrated codecs. Requires hardware
 
 ### Future Ideas
 - Snapcast client mode (dual-purpose intercom/speaker)
