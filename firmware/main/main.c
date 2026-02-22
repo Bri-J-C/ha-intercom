@@ -28,6 +28,7 @@
 #include "ha_mqtt.h"
 #include "diagnostics.h"
 #include "display.h"
+#include "mdns.h"
 #include "agc.h"
 #include "esp_heap_caps.h"
 #include "esp_attr.h"
@@ -841,6 +842,32 @@ void app_main(void)
     ESP_LOGI(TAG, "Connecting to WiFi: %s", wifi_ssid);
     ESP_ERROR_CHECK(network_init(wifi_ssid, wifi_pass));
 
+    // Compute sanitized hostname from room name BEFORE connecting,
+    // so mDNS and DHCP hostname are ready when IP is obtained
+    char hostname[32];
+    const char *room = cfg->room_name;
+    int j = 0;
+    for (int i = 0; room[i] && j < sizeof(hostname) - 1; i++) {
+        char c = room[i];
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            hostname[j++] = c;
+        } else if (c >= 'A' && c <= 'Z') {
+            hostname[j++] = c + 32;  // lowercase
+        } else if (c == ' ' || c == '-' || c == '_') {
+            if (j > 0 && hostname[j-1] != '-') hostname[j++] = '-';
+        }
+    }
+    hostname[j] = '\0';
+    if (j == 0) strcpy(hostname, "intercom");
+
+    // Set DHCP hostname before connection completes (shown in router client list)
+    network_set_hostname(hostname);
+
+    // Start mDNS BEFORE waiting for connection so its internal event handler
+    // catches IP_EVENT_STA_GOT_IP and enables the PCB automatically
+    network_start_mdns(hostname);
+    ESP_LOGI(TAG, "mDNS: will announce as http://%s.local/ when connected", hostname);
+
     esp_err_t ret = network_wait_connected(30000);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "WiFi connection timeout - check AP mode");
@@ -851,34 +878,14 @@ void app_main(void)
 
         // Start webserver in AP mode for configuration
         if (network_is_ap_mode()) {
-            network_start_mdns("intercom-setup");
+            mdns_hostname_set("intercom-setup");
             webserver_start();
             ESP_LOGI(TAG, "AP mode active - configure at http://192.168.4.1/ or http://intercom-setup.local/");
         }
     } else {
         char ip_str[16];
         network_get_ip(ip_str);
-        ESP_LOGI(TAG, "Connected! IP: %s", ip_str);
-
-        // Start mDNS with sanitized room name as hostname
-        char hostname[32];
-        const char *room = cfg->room_name;
-        int j = 0;
-        for (int i = 0; room[i] && j < sizeof(hostname) - 1; i++) {
-            char c = room[i];
-            if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-                hostname[j++] = c;
-            } else if (c >= 'A' && c <= 'Z') {
-                hostname[j++] = c + 32;  // lowercase
-            } else if (c == ' ' || c == '-' || c == '_') {
-                if (j > 0 && hostname[j-1] != '-') hostname[j++] = '-';
-            }
-        }
-        hostname[j] = '\0';
-        if (j == 0) strcpy(hostname, "intercom");
-
-        network_start_mdns(hostname);
-        ESP_LOGI(TAG, "Access at http://%s.local/", hostname);
+        ESP_LOGI(TAG, "Connected! IP: %s, access at http://%s.local/", ip_str, hostname);
 
         // Start web server for config/OTA
         webserver_start();

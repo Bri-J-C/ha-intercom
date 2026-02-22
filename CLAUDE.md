@@ -62,7 +62,7 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 | `main/audio_input.c` | I2S mic input (INMP441), 32->16bit conversion, PSRAM buffers |
 | `main/audio_output.c` | I2S speaker output (MAX98357A), mono->stereo, volume, PSRAM buffers |
 | `main/codec.c` | Opus encoder/decoder (PSRAM-allocated ~36KB), PLC, FEC support |
-| `main/network.c` | WiFi STA/AP mode, UDP multicast/unicast, mDNS, multicast loopback disabled |
+| `main/network.c` | WiFi STA/AP mode, UDP multicast/unicast, mDNS (init before WiFi, enable/disable on IP events, 60s re-announce), DHCP hostname, multicast loopback disabled |
 | `main/ha_mqtt.c` | MQTT client, HA auto-discovery, device tracking, room targeting, call notifications |
 | `main/display.c` | SSD1306 OLED (I2C), room selector UI, cycle button, state display |
 | `main/settings.c` | NVS storage with AES-256-GCM encryption (key from eFuse MAC) |
@@ -100,7 +100,7 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 - **PSRAM config**: `sdkconfig.esp32s3` controls PSRAM (not just `sdkconfig.defaults`). After sdkconfig changes, run `pio run -t fullclean` before building
 - **Encryption**: WiFi/MQTT/Web/AP passwords are AES-256-GCM encrypted in NVS. Key derived from eFuse MAC + salt via SHA-256. Backwards compatible with plaintext
 
-## Current Features (v2.2.0 hub / v2.7.0 firmware)
+## Current Features (v2.2.0 hub / v2.7.1 firmware)
 
 ### ESP32 Firmware
 - Push-to-talk via BOOT button with first-to-talk collision avoidance
@@ -120,6 +120,8 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 - AES-256-GCM credential encryption in NVS
 - Web config portal + OTA updates
 - WiFi AP fallback mode for initial setup
+- mDNS initialized before WiFi connect (catches `IP_EVENT_STA_GOT_IP`); re-enabled with `MDNS_EVENT_ENABLE_IP4` on reconnect; disabled with `MDNS_EVENT_DISABLE_IP4` on disconnect; 60s periodic re-announcement timer as safety net
+- DHCP hostname set via `esp_netif_set_hostname()` (routers show correct device name in client list)
 
 ### Hub Add-on
 - WebSocket-based Web PTT with individual client IDs and registration
@@ -131,7 +133,7 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 - TTS with channel-busy waiting
 - Call/notify between all node types (ESP32, web, mobile)
 - Room selector dropdown with all discovered devices
-- Custom Lovelace PTT card (intercom-ptt-card.js)
+- Custom Lovelace PTT card (intercom-ptt-card.js v1.2.0) with ingress and direct `hub_url` connection modes
 
 ### Web PTT (Browser)
 - Gradient-themed UI with PTT button and call button

@@ -11,9 +11,10 @@
  *
  * Card config:
  *   type: custom:intercom-ptt-card
- *   default_target: "Bedroom"   # Optional: pre-select target room
- *   name: "Intercom"            # Optional: card title
- *   show_call: true             # Optional: show call button (default true)
+ *   default_target: "Bedroom"              # Optional: pre-select target room
+ *   name: "Intercom"                       # Optional: card title
+ *   show_call: true                        # Optional: show call button (default true)
+ *   hub_url: "ws://10.0.0.8:8099/ws"      # Optional: bypass ingress, connect directly to hub port
  */
 
 // AudioWorklet processor code (inlined for Blob URL — can't use relative path in Lovelace)
@@ -59,6 +60,7 @@ registerProcessor('ptt-processor', PTTProcessor);
 `;
 
 const ADDON_SLUG = 'local_intercom_hub';
+const CARD_VERSION = '1.2.0';
 
 const CARD_STYLES = `
     :host {
@@ -88,22 +90,26 @@ const CARD_STYLES = `
     }
 
     .header {
-        display: flex;
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
         align-items: center;
-        justify-content: space-between;
         margin-bottom: 16px;
     }
     .title {
+        grid-column: 2;
         font-size: 16px;
         font-weight: 600;
+        text-align: center;
         background: var(--gradient);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         background-clip: text;
     }
     .version {
+        grid-column: 3;
         font-size: 10px;
         color: rgba(255,255,255,0.2);
+        text-align: right;
     }
 
     .status-bar {
@@ -273,6 +279,13 @@ const CARD_STYLES = `
         font-size: 13px;
         margin-bottom: 20px;
     }
+    .init-logo {
+        width: 80px;
+        height: 80px;
+        color: var(--cyan);
+        filter: drop-shadow(0 4px 16px rgba(0, 212, 255, 0.4));
+        margin-bottom: 20px;
+    }
     .init-button {
         padding: 12px 36px;
         font-size: 15px;
@@ -324,7 +337,7 @@ class IntercomPTTCard extends HTMLElement {
         this._nextPlayTime = 0;
         this._clientId = null;
         this._reconnectTimer = null;
-        this._ingressSession = null;
+        this._ingressEntry = null;
     }
 
     static getConfigElement() {
@@ -340,6 +353,7 @@ class IntercomPTTCard extends HTMLElement {
             default_target: config.default_target || '',
             name: config.name || 'Intercom',
             show_call: config.show_call !== false,
+            hub_url: config.hub_url || '',
             ...config
         };
         if (this._rendered) this._updateHeader();
@@ -364,8 +378,17 @@ class IntercomPTTCard extends HTMLElement {
             <style>${CARD_STYLES}</style>
             <div class="card-container">
                 <div class="init-overlay" id="initOverlay">
+                    <svg class="init-logo" viewBox="0 0 512 512" fill="none">
+                        <rect x="32" y="32" width="448" height="448" rx="72" stroke="currentColor" stroke-width="48"/>
+                        <rect x="116" y="140" width="36" height="140" rx="18" fill="currentColor"/>
+                        <rect x="178" y="110" width="36" height="200" rx="18" fill="currentColor"/>
+                        <rect x="238" y="95" width="36" height="230" rx="18" fill="currentColor"/>
+                        <rect x="298" y="110" width="36" height="200" rx="18" fill="currentColor"/>
+                        <rect x="360" y="140" width="36" height="140" rx="18" fill="currentColor"/>
+                        <path d="M140 370 Q256 440 372 370" stroke="currentColor" stroke-width="32" stroke-linecap="round" fill="none"/>
+                    </svg>
                     <div class="init-title">${this._config.name}</div>
-                    <div class="init-subtitle">Push-to-talk communication</div>
+                    <div class="init-subtitle">Push-to-talk communication &middot; card v${CARD_VERSION}</div>
                     <button class="init-button" id="initBtn">Tap to Connect</button>
                 </div>
                 <div class="main-ui" id="mainUI">
@@ -486,60 +509,114 @@ class IntercomPTTCard extends HTMLElement {
         return id;
     }
 
-    // --- Ingress Session ---
+    // --- Ingress Entry URL ---
 
-    async _getIngressSession() {
-        // Method 1: HA WebSocket API (most reliable — uses existing authenticated connection)
+    async _getIngressEntry() {
+        // Get the add-on's stable ingress entry path (e.g. "/api/hassio_ingress/{token}")
+        // This is NOT the same as a user session — it's the add-on's routing path.
+
+        // Method 1: HA WebSocket API (most reliable)
         try {
             const result = await this._hass.callWS({
                 type: 'supervisor/api',
-                endpoint: '/ingress/session',
-                method: 'post',
-                data: { addon: ADDON_SLUG }
+                endpoint: `/addons/${ADDON_SLUG}/info`,
+                method: 'get'
             });
-            if (result?.session) {
-                console.log('Intercom card: got ingress session via WS');
-                return result.session;
+            console.log('Intercom card: raw WS addon info result:', JSON.stringify(result));
+            if (result?.ingress_entry) {
+                console.log('Intercom card: got ingress entry via WS:', result.ingress_entry);
+                return result.ingress_entry;
             }
         } catch (e) {
-            console.warn('Intercom card: WS ingress method failed:', e.message || e);
+            console.warn('Intercom card: WS addon info failed:', e.message || e);
         }
 
         // Method 2: REST API with auth token
         try {
-            const token = this._hass?.auth?.data?.access_token;
+            const token = this._hass?.auth?.data?.access_token
+                       || this._hass?.connection?.options?.auth?.data?.access_token;
+            if (token) {
+                const resp = await fetch(`/api/hassio/addons/${ADDON_SLUG}/info`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const entry = data?.data?.ingress_entry;
+                    if (entry) {
+                        console.log('Intercom card: got ingress entry via REST:', entry);
+                        return entry;
+                    }
+                }
+                console.warn('Intercom card: REST addon info failed:', resp.status);
+            }
+        } catch (e) {
+            console.warn('Intercom card: REST addon info failed:', e.message || e);
+        }
+
+        throw new Error('Could not get ingress URL for add-on. Are you logged in as an admin?');
+    }
+
+    async _createIngressSession() {
+        // The ingress proxy requires a session cookie for authentication.
+        // Create a session and set it as a cookie on the ingress path.
+        try {
+            const result = await this._hass.callWS({
+                type: 'supervisor/api',
+                endpoint: '/ingress/session',
+                method: 'post'
+            });
+            if (result?.session) {
+                // Set the cookie so the browser sends it with the WebSocket upgrade request.
+                // Match HA frontend exactly: no spaces after semicolons, conditional Secure flag.
+                const secureFlag = location.protocol === 'https:' ? ';Secure' : '';
+                document.cookie = `ingress_session=${result.session};path=/api/hassio_ingress/;SameSite=Strict${secureFlag}`;
+                console.log('Intercom card: ingress session cookie set (WS), Secure:', secureFlag !== '');
+                return;
+            }
+        } catch (e) {
+            console.warn('Intercom card: WS session method failed:', e.message || e);
+        }
+
+        // Fallback: REST
+        try {
+            const token = this._hass?.auth?.data?.access_token
+                       || this._hass?.connection?.options?.auth?.data?.access_token;
             if (token) {
                 const resp = await fetch('/api/hassio/ingress/session', {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${token}`,
                         'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ addon: ADDON_SLUG })
+                    }
                 });
                 if (resp.ok) {
                     const data = await resp.json();
-                    const session = data?.data?.session;
-                    if (session) {
-                        console.log('Intercom card: got ingress session via REST');
-                        return session;
+                    if (data?.data?.session) {
+                        const secureFlag = location.protocol === 'https:' ? ';Secure' : '';
+                        document.cookie = `ingress_session=${data.data.session};path=/api/hassio_ingress/;SameSite=Strict${secureFlag}`;
+                        console.log('Intercom card: ingress session cookie set (REST), Secure:', secureFlag !== '');
+                        return;
                     }
                 }
-                console.warn('Intercom card: REST ingress failed:', resp.status);
             }
         } catch (e) {
-            console.warn('Intercom card: REST ingress method failed:', e.message || e);
+            console.warn('Intercom card: REST session method failed:', e.message || e);
         }
-
-        throw new Error('Could not get ingress session. Are you logged in as an admin?');
+        console.warn('Intercom card: could not create ingress session — WebSocket may fail');
     }
 
     // --- Initialization ---
 
     async _initialize() {
         try {
-            // Get ingress session first
-            this._ingressSession = await this._getIngressSession();
+            if (this._config.hub_url) {
+                // Direct connection mode: bypass ingress entirely
+                console.log('Intercom card: using direct hub_url:', this._config.hub_url);
+            } else {
+                // Ingress mode: get add-on entry URL and create auth session
+                this._ingressEntry = await this._getIngressEntry();
+                await this._createIngressSession();
+            }
 
             // Setup mic if secure context
             if (window.isSecureContext) {
@@ -570,7 +647,9 @@ class IntercomPTTCard extends HTMLElement {
             this._isInitialized = true;
             this._micEnabled = false;
             try {
-                this._ingressSession = this._ingressSession || await this._getIngressSession();
+                if (!this._config.hub_url) {
+                    this._ingressEntry = this._ingressEntry || await this._getIngressEntry();
+                }
                 this._audioContext = new AudioContext({ sampleRate: 16000 });
                 this._connectWebSocket();
             } catch (e2) {
@@ -632,9 +711,16 @@ class IntercomPTTCard extends HTMLElement {
     // --- WebSocket ---
 
     _connectWebSocket() {
-        if (!this._ingressSession) return;
-
-        const wsUrl = `wss://${location.host}/api/hassio_ingress/${this._ingressSession}/ws`;
+        let wsUrl;
+        if (this._config.hub_url) {
+            // Direct connection: use the configured URL verbatim
+            wsUrl = this._config.hub_url;
+        } else {
+            if (!this._ingressEntry) return;
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const basePath = this._ingressEntry.replace(/\/$/, '');
+            wsUrl = `${wsProtocol}//${location.host}${basePath}/ws`;
+        }
         console.log('Intercom card: connecting to', wsUrl);
 
         this._websocket = new WebSocket(wsUrl);
@@ -667,16 +753,15 @@ class IntercomPTTCard extends HTMLElement {
             if (this._els.callBtn) this._els.callBtn.disabled = true;
             this._updatePttStatus('idle');
 
-            // Reconnect
+            // Reconnect (refresh session cookie for ingress mode)
             if (this._isInitialized && !document.hidden) {
                 this._reconnectTimer = setTimeout(async () => {
-                    try {
-                        this._ingressSession = await this._getIngressSession();
-                        this._connectWebSocket();
-                    } catch (e) {
-                        console.error('Intercom card: reconnect failed', e);
-                        this._reconnectTimer = setTimeout(() => this._connectWebSocket(), 5000);
+                    if (!this._config.hub_url) {
+                        try {
+                            await this._createIngressSession();
+                        } catch (e) { /* best effort */ }
                     }
+                    this._connectWebSocket();
                 }, 3000);
             }
         };
@@ -873,7 +958,17 @@ class IntercomPTTCard extends HTMLElement {
     async _resume() {
         if (!this._isInitialized) return;
         try {
-            this._ingressSession = await this._getIngressSession();
+            if (this._config.hub_url) {
+                // Direct mode: no ingress entry or session needed
+                console.log('Intercom card: resuming with direct hub_url');
+            } else {
+                // Re-fetch entry URL only if we don't have one cached
+                if (!this._ingressEntry) {
+                    this._ingressEntry = await this._getIngressEntry();
+                }
+                // Refresh session cookie (sessions expire)
+                await this._createIngressSession();
+            }
             if (window.isSecureContext) {
                 await this._setupMic();
             } else {
@@ -955,12 +1050,15 @@ class IntercomPTTCardEditor extends HTMLElement {
                     <option value="true" ${this._config.show_call !== false ? 'selected' : ''}>Yes</option>
                     <option value="false" ${this._config.show_call === false ? 'selected' : ''}>No</option>
                 </select>
+                <label>Hub URL (direct, bypasses ingress)</label>
+                <input id="hub_url" value="${this._config.hub_url || ''}" placeholder="e.g. ws://10.0.0.8:8099/ws (leave empty for ingress)">
             </div>
         `;
 
         this.querySelector('#name').addEventListener('input', (e) => this._update('name', e.target.value));
         this.querySelector('#default_target').addEventListener('input', (e) => this._update('default_target', e.target.value));
         this.querySelector('#show_call').addEventListener('change', (e) => this._update('show_call', e.target.value === 'true'));
+        this.querySelector('#hub_url').addEventListener('input', (e) => this._update('hub_url', e.target.value));
     }
 
     _update(key, value) {

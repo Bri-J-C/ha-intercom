@@ -84,6 +84,12 @@ esp_err_t network_send_multicast(const audio_packet_t *packet, size_t len);
 esp_err_t network_send_unicast(const audio_packet_t *packet, size_t len, const char *dest_ip);
 
 /**
+ * Set the DHCP hostname (shown in router client list).
+ * Must be called before WiFi connection completes.
+ */
+esp_err_t network_set_hostname(const char *hostname);
+
+/**
  * Start mDNS service with given hostname.
  * Device will be accessible at hostname.local
  */
