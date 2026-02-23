@@ -12,9 +12,12 @@ PlatformIO-based firmware for the intercom satellite nodes.
 - Do Not Disturb mode with emergency override
 - AGC (Automatic Gain Control) for consistent microphone levels
 - AEC (Acoustic Echo Cancellation) via ESP-SR
-- Incoming call chime with LED flash
+- Hub-managed chime: on an incoming call, the hub streams WAV chime audio via UDP/Opus; the ESP32 detects hub audio within a 150ms window and skips the local fallback beep. If no hub audio arrives, `play_fallback_beep()` plays a local tone and flushes the RX queue via `xQueueReset()` to prevent play task contention
+- Chime name extracted from MQTT call JSON payload and logged for diagnostics
+- Self-exclusion guard: a 2-second lockout (`CALL_TX_LOCKOUT_MS`) suppresses the chime when the MQTT call message is a bounce-back from our own "All Rooms" call
 - AES-256-GCM encrypted credential storage in NVS
 - OTA firmware updates via web interface (`http://<device-ip>/update`)
+- Test API endpoints: `GET /api/status` (JSON device state), `POST /api/test` (trigger test beep)
 - Web config portal for WiFi, MQTT, and device settings
 - WiFi AP fallback mode for initial setup
 - Availability tracking (online/offline per device via MQTT LWT)
@@ -23,8 +26,11 @@ PlatformIO-based firmware for the intercom satellite nodes.
 - Lead-in/trail-out silence frames for clean audio start/stop
 - mDNS reliability fixes: initialized before WiFi connect, re-enabled on reconnect via `MDNS_EVENT_ENABLE_IP4`, disabled on disconnect, 60-second periodic re-announcement as safety net
 - DHCP hostname registration via `esp_netif_set_hostname()` so routers display the correct device name
+- WiFi power save disabled via `esp_wifi_set_ps(WIFI_PS_NONE)` to prevent multicast packet loss from the radio sleeping between DTIM beacons
+- Multicast group: `239.255.0.100:5005` (organization-local scope; must match hub `multicast_group` config)
 - Separate TX/RX PCM buffers to eliminate shared-buffer race condition between TX and RX tasks
 - RX audio queue (15-deep FreeRTOS queue) with dedicated `audio_play_task` on PSRAM stack — decouples network receive from Opus decode/I2S write
+- I2S restart recovery: if `audio_output_write()` returns 0 while `audio_playing=true` and the channel is no longer active, `audio_output_start()` is called automatically before retrying the write
 - Reduced DMA pre-fill on audio start: 2 descriptors (~40ms latency) instead of 8 (~160ms)
 - I2S write timeout capped at 20ms (one frame budget) to prevent RX task stalls
 - Silence gate: Opus frames smaller than 10 bytes are treated as trail-out silence and do not acquire the audio channel or trigger RECEIVING state
@@ -32,9 +38,8 @@ PlatformIO-based firmware for the intercom satellite nodes.
 - RX audio queue flushed via `xQueueReset()` on PTT press (both normal and preemption paths) to discard stale queued audio before transmitting
 - LED spinlock (`portMUX_TYPE`) in `button.c` makes `button_set_led_state()` safe to call from multiple tasks concurrently
 - FreeRTOS mutex in `audio_output.c` protects all I2S state transitions (start/stop/write) — eliminates TOCTOU race where `write()` could call `i2s_channel_write()` on a channel being concurrently disabled by `stop()`, causing "The channel is not enabled" errors
-- Incoming call chime: 150ms delay in `play_incoming_call_chime()` allows hub chime UDP packets to arrive before deciding whether to fall back to the local beep; `play_fallback_beep()` flushes the RX queue via `xQueueReset()` to prevent play task contention during beep playback
 - Webserver `max_open_sockets` reduced from 7 to 3, freeing lwIP socket slots for MQTT and UDP
-- `SPIRAM_MALLOC_ALWAYSINTERNAL` reduced from 16384 to 4096: prevents internal RAM exhaustion that caused MQTT cycling when many sockets were active
+- `SPIRAM_MALLOC_ALWAYSINTERNAL` set to 4096: prevents internal RAM exhaustion that caused MQTT cycling when many sockets were active
 - `LWIP_MAX_SOCKETS` increased from 10 to 16 to accommodate concurrent UDP, mDNS, HTTP, and MQTT sockets
 - `SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`: non-DMA WiFi and lwIP structures use PSRAM, preserving internal RAM for time-critical allocations
 
@@ -171,6 +176,10 @@ Navigate to `http://<device-ip>/update` in a browser to upload new firmware over
 ### Web Config
 Navigate to `http://<device-ip>/` to configure WiFi, MQTT, device name, and other settings.
 
+### Test API
+- `GET http://<device-ip>/api/status` — returns a JSON object with the current device state (room name, firmware version, WiFi RSSI, heap, etc.)
+- `POST http://<device-ip>/api/test` — triggers a test beep on the device speaker
+
 ## Troubleshooting
 
 ### No audio output
@@ -193,6 +202,17 @@ Navigate to `http://<device-ip>/` to configure WiFi, MQTT, device name, and othe
 - Check MQTT broker is running (Mosquitto add-on)
 - Verify MQTT settings in web config match HA's broker
 - Check both devices on same network
+
+### Chime not playing / only beep heard
+- Ensure the hub is reachable from the ESP32 (check MQTT connectivity)
+- The hub must have at least one WAV chime loaded (`/data/chimes/` on the HA host)
+- The 150ms detection window starts when the MQTT call arrives; if the hub UDP audio arrives before the window expires, the fallback beep is suppressed
+- If only the fallback beep plays, the hub may be unreachable or have no chimes loaded
+
+### Multicast audio not working
+- Verify hub `multicast_group` config matches firmware (`239.255.0.100`)
+- All devices (ESP32 and HA host) must be on the same network subnet
+- The hub add-on requires `host_network: true` for multicast to function
 
 ### OLED not working
 - Verify I2C wiring (SDA=GPIO8, SCL=GPIO9)

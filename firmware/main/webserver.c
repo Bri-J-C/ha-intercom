@@ -9,6 +9,9 @@
 #include "settings.h"
 #include "diagnostics.h"
 #include "protocol.h"
+#include "audio_output.h"
+#include "ha_mqtt.h"
+#include "cJSON.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -784,6 +787,84 @@ static esp_err_t diagnostics_json_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// GET /api/status - JSON status endpoint for testing and monitoring
+// Requires auth (same as other endpoints) to prevent information leakage
+static esp_err_t api_status_handler(httpd_req_t *req)
+{
+    if (!check_basic_auth(req)) {
+        return send_auth_required(req);
+    }
+    extern bool main_is_audio_playing(void);
+    extern UBaseType_t main_get_rx_queue_depth(void);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "version", FIRMWARE_VERSION);
+    cJSON_AddStringToObject(root, "room", settings_get()->room_name);
+    cJSON_AddBoolToObject(root, "audio_playing", main_is_audio_playing());
+    cJSON_AddBoolToObject(root, "i2s_active", audio_output_is_active());
+    cJSON_AddNumberToObject(root, "queue_depth", main_get_rx_queue_depth());
+    cJSON_AddNumberToObject(root, "volume", audio_output_get_volume());
+    cJSON_AddBoolToObject(root, "muted", audio_output_is_muted());
+    cJSON_AddNumberToObject(root, "uptime", diagnostics_get_uptime());
+    cJSON_AddNumberToObject(root, "free_heap", esp_get_free_heap_size());
+    cJSON_AddStringToObject(root, "last_chime", ha_mqtt_get_incoming_chime());
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
+    return ESP_OK;
+}
+
+// POST /api/test - trigger test actions (e.g. beep)
+// Requires auth to prevent unauthorized audio output
+static esp_err_t api_test_handler(httpd_req_t *req)
+{
+    if (!check_basic_auth(req)) {
+        return send_auth_required(req);
+    }
+    extern void main_trigger_test_beep(void);
+
+    char buf[128] = {0};
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+
+    cJSON *body = cJSON_Parse(buf);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *action = cJSON_GetObjectItem(body, "action");
+    if (!action || !cJSON_IsString(action)) {
+        cJSON_Delete(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing action");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+
+    if (strcmp(action->valuestring, "beep") == 0) {
+        main_trigger_test_beep();
+        httpd_resp_sendstr(req, "{\"result\":\"ok\",\"action\":\"beep\"}");
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown action");
+        cJSON_Delete(body);
+        return ESP_FAIL;
+    }
+
+    cJSON_Delete(body);
+    return ESP_OK;
+}
+
 esp_err_t webserver_start(void)
 {
     if (server) {
@@ -814,6 +895,8 @@ esp_err_t webserver_start(void)
     httpd_uri_t ota = {.uri = "/update", .method = HTTP_POST, .handler = ota_handler};
     httpd_uri_t diag = {.uri = "/diagnostics", .method = HTTP_GET, .handler = diagnostics_handler};
     httpd_uri_t diag_json = {.uri = "/diagnostics/json", .method = HTTP_GET, .handler = diagnostics_json_handler};
+    httpd_uri_t api_status = {.uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler};
+    httpd_uri_t api_test = {.uri = "/api/test", .method = HTTP_POST, .handler = api_test_handler};
 
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &save);
@@ -821,6 +904,8 @@ esp_err_t webserver_start(void)
     httpd_register_uri_handler(server, &ota);
     httpd_register_uri_handler(server, &diag);
     httpd_register_uri_handler(server, &diag_json);
+    httpd_register_uri_handler(server, &api_status);
+    httpd_register_uri_handler(server, &api_test);
 
     ESP_LOGI(TAG, "Web server started");
     return ESP_OK;

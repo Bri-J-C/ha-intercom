@@ -520,6 +520,196 @@
         .device-name-input::placeholder {
             color: var(--text-dim);
         }
+
+        /* Chime Settings */
+        .chime-section {
+            margin-bottom: 16px;
+        }
+
+        .chime-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: border-color 0.2s ease;
+            user-select: none;
+        }
+
+        .chime-toggle:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .chime-toggle-label {
+            color: var(--text-dim);
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .chime-toggle-arrow {
+            color: var(--text-dim);
+            font-size: 12px;
+            transition: transform 0.2s ease;
+        }
+
+        .chime-section.open .chime-toggle-arrow {
+            transform: rotate(180deg);
+        }
+
+        .chime-panel {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+
+        .chime-section.open .chime-panel {
+            max-height: 600px;
+        }
+
+        .chime-panel-inner {
+            padding: 12px 0 0 0;
+        }
+
+        .chime-select-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .chime-select {
+            flex: 1;
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.5)' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+        }
+
+        .chime-select:focus {
+            outline: none;
+            border-color: var(--cyan);
+        }
+
+        .chime-preview-btn {
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-dim);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+        }
+
+        .chime-preview-btn:hover {
+            border-color: var(--cyan);
+            color: var(--cyan);
+        }
+
+        .chime-upload-zone {
+            border: 2px dashed var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-bottom: 12px;
+        }
+
+        .chime-upload-zone:hover,
+        .chime-upload-zone.dragover {
+            border-color: var(--cyan);
+            background: rgba(0, 212, 255, 0.05);
+        }
+
+        .chime-upload-zone p {
+            margin: 0;
+            color: var(--text-dim);
+            font-size: 13px;
+        }
+
+        .chime-upload-zone .upload-hint {
+            font-size: 11px;
+            margin-top: 4px;
+            color: rgba(255, 255, 255, 0.3);
+        }
+
+        .chime-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .chime-list-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .chime-list-item:last-child {
+            border-bottom: none;
+        }
+
+        .chime-item-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .chime-item-name {
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .chime-item-duration {
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+
+        .chime-delete-btn {
+            padding: 4px 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            background: transparent;
+            color: var(--error);
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .chime-delete-btn:hover {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: var(--error);
+        }
+
+        .chime-status {
+            font-size: 12px;
+            color: var(--text-dim);
+            text-align: center;
+            padding: 6px 0;
+        }
+
+        .chime-status.error {
+            color: var(--error);
+        }
+
+        .chime-status.success {
+            color: var(--success);
+        }
     </style>
 </head>
 <body>
@@ -594,6 +784,36 @@
             </label>
         </div>
 
+        <!-- Chime Settings (collapsible) -->
+        <div id="chimeSection" class="chime-section">
+            <div class="chime-toggle" onclick="toggleChimePanel()">
+                <span class="chime-toggle-label">Chime Settings</span>
+                <span class="chime-toggle-arrow">&#9660;</span>
+            </div>
+            <div class="chime-panel">
+                <div class="chime-panel-inner">
+                    <!-- Active chime selector + preview -->
+                    <div class="chime-select-row">
+                        <select id="chimeSelect" class="chime-select"></select>
+                        <button class="chime-preview-btn" onclick="previewChime()">Preview</button>
+                    </div>
+
+                    <!-- Upload zone -->
+                    <div id="chimeUploadZone" class="chime-upload-zone">
+                        <p>Drop WAV file here or click to upload</p>
+                        <p class="upload-hint">16kHz mono recommended, max 5MB</p>
+                        <input type="file" id="chimeFileInput" accept=".wav" style="display:none">
+                    </div>
+
+                    <!-- Status message -->
+                    <div id="chimeStatus" class="chime-status" style="display:none"></div>
+
+                    <!-- Installed chimes list -->
+                    <ul id="chimeList" class="chime-list"></ul>
+                </div>
+            </div>
+        </div>
+
         <div class="ptt-container">
             <button id="pttButton" class="ptt-button disabled">
                 <svg class="ptt-icon" viewBox="0 0 512 512" fill="none">
@@ -617,5 +837,186 @@
     </div>
 
     <script src="ptt-v7.js"></script>
+    <script>
+    // Chime management
+    (function() {
+        const chimeSection = document.getElementById('chimeSection');
+        const chimeSelect = document.getElementById('chimeSelect');
+        const chimeList = document.getElementById('chimeList');
+        const chimeStatus = document.getElementById('chimeStatus');
+        const uploadZone = document.getElementById('chimeUploadZone');
+        const fileInput = document.getElementById('chimeFileInput');
+
+        // Determine base URL — must include ingress path prefix
+        const basePath = window.location.pathname.replace(/\/$/, '');
+        const baseUrl = window.location.origin + basePath;
+
+        window.toggleChimePanel = function() {
+            chimeSection.classList.toggle('open');
+            if (chimeSection.classList.contains('open')) {
+                loadChimes();
+            }
+        };
+
+        function showStatus(msg, type) {
+            chimeStatus.textContent = msg;
+            chimeStatus.className = 'chime-status' + (type ? ' ' + type : '');
+            chimeStatus.style.display = 'block';
+            if (type !== 'error') {
+                setTimeout(() => { chimeStatus.style.display = 'none'; }, 3000);
+            }
+        }
+
+        async function loadChimes() {
+            try {
+                const resp = await fetch(baseUrl + '/api/chimes');
+                if (!resp.ok) throw new Error('Failed to load chimes');
+                const data = await resp.json();
+
+                // Populate selector
+                chimeSelect.innerHTML = '';
+                data.chimes.forEach(c => {
+                    const opt = document.createElement('option');
+                    opt.value = c.name;
+                    opt.textContent = c.name;
+                    if (c.name === data.current) opt.selected = true;
+                    chimeSelect.appendChild(opt);
+                });
+
+                // Populate list
+                chimeList.innerHTML = '';
+                data.chimes.forEach(c => {
+                    const li = document.createElement('li');
+                    li.className = 'chime-list-item';
+                    li.innerHTML =
+                        '<div class="chime-item-info">' +
+                            '<span class="chime-item-name">' + escapeHtml(c.name) +
+                                (c.name === data.current ? ' (active)' : '') +
+                            '</span>' +
+                            '<span class="chime-item-duration">' + c.duration + 's / ' + c.frames + ' frames</span>' +
+                        '</div>';
+                    if (c.name !== 'doorbell') {
+                        const btn = document.createElement('button');
+                        btn.className = 'chime-delete-btn';
+                        btn.textContent = 'Delete';
+                        btn.onclick = () => deleteChime(c.name);
+                        li.appendChild(btn);
+                    }
+                    chimeList.appendChild(li);
+                });
+            } catch (e) {
+                showStatus('Failed to load chimes', 'error');
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // Chime selection change -> tell hub via WebSocket (piggyback on existing connection)
+        chimeSelect.addEventListener('change', function() {
+            const name = chimeSelect.value;
+            // Use the existing WS connection from ptt-v7.js if available
+            if (window.intercomPTT && window.intercomPTT.websocket && window.intercomPTT.websocket.readyState === WebSocket.OPEN) {
+                window.intercomPTT.websocket.send(JSON.stringify({ type: 'set_chime', chime: name }));
+                showStatus('Chime set to: ' + name, 'success');
+            } else {
+                showStatus('Not connected', 'error');
+            }
+        });
+
+        window.previewChime = function() {
+            // Preview = trigger a call to the currently selected target with the selected chime
+            // This uses the existing call mechanism which streams the chime
+            const target = document.getElementById('targetSelect');
+            if (window.intercomPTT && window.intercomPTT.websocket && window.intercomPTT.websocket.readyState === WebSocket.OPEN) {
+                window.intercomPTT.websocket.send(JSON.stringify({
+                    type: 'call',
+                    target: target ? target.value : 'all'
+                }));
+                showStatus('Previewing chime...', 'success');
+            } else {
+                showStatus('Not connected', 'error');
+            }
+        };
+
+        // Upload handling
+        uploadZone.addEventListener('click', () => fileInput.click());
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                uploadFile(e.dataTransfer.files[0]);
+            }
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                uploadFile(fileInput.files[0]);
+                fileInput.value = '';
+            }
+        });
+
+        async function uploadFile(file) {
+            if (!file.name.toLowerCase().endsWith('.wav')) {
+                showStatus('Only .wav files are accepted', 'error');
+                return;
+            }
+            if (file.size > 5 * 1024 * 1024) {
+                showStatus('File too large (max 5MB)', 'error');
+                return;
+            }
+            showStatus('Uploading...', '');
+            try {
+                const form = new FormData();
+                form.append('file', file);
+                const resp = await fetch(baseUrl + '/api/chimes/upload', {
+                    method: 'POST',
+                    body: form
+                });
+                const text = await resp.text();
+                let data;
+                try { data = JSON.parse(text); } catch (_) {
+                    showStatus('Server error: ' + (text.substring(0, 80) || resp.status), 'error');
+                    return;
+                }
+                if (!resp.ok) {
+                    showStatus(data.error || 'Upload failed', 'error');
+                    return;
+                }
+                showStatus('Uploaded: ' + data.name + ' (' + data.duration + 's)', 'success');
+                loadChimes();
+            } catch (e) {
+                showStatus('Upload failed: ' + e.message, 'error');
+            }
+        }
+
+        async function deleteChime(name) {
+            if (!confirm('Delete chime "' + name + '"?')) return;
+            try {
+                const resp = await fetch(baseUrl + '/api/chimes/' + encodeURIComponent(name), {
+                    method: 'DELETE'
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    showStatus(data.error || 'Delete failed', 'error');
+                    return;
+                }
+                showStatus('Deleted: ' + name, 'success');
+                loadChimes();
+            } catch (e) {
+                showStatus('Delete failed: ' + e.message, 'error');
+            }
+        }
+    })();
+    </script>
 </body>
 </html>

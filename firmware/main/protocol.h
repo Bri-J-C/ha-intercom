@@ -11,12 +11,12 @@
 #include <stdint.h>
 
 // Firmware version - bump with every firmware change
-#define FIRMWARE_VERSION        "2.8.1"
+#define FIRMWARE_VERSION        "2.9.1"
 
 // Network Configuration
 #define CONTROL_PORT        5004
 #define AUDIO_PORT          5005
-#define MULTICAST_GROUP     "224.0.0.100"
+#define MULTICAST_GROUP     "239.255.0.100"
 #define MULTICAST_TTL       1
 
 // Audio Configuration

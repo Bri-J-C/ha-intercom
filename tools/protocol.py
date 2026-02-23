@@ -12,7 +12,7 @@ from typing import Optional
 # Network Configuration
 CONTROL_PORT = 5004      # Discovery and config
 AUDIO_PORT = 5005        # Audio streaming
-MULTICAST_GROUP = "224.0.0.100"
+MULTICAST_GROUP = "239.255.0.100"
 MULTICAST_TTL = 1        # Local network only
 
 # Audio Configuration

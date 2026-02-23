@@ -318,8 +318,15 @@ static void process_rx_packet(const audio_packet_t *packet, size_t total_len)
     if (samples > 0) {
         int written = audio_output_write(rx_pcm_buffer, samples, 20);
         if (written == 0 && audio_playing) {
-            ESP_LOGW(TAG, "RX write returned 0 while audio_playing=true (seq=%lu, opus_len=%u)",
-                     (unsigned long)seq, (unsigned)opus_len);
+            if (!audio_output_is_active()) {
+                ESP_LOGW(TAG, "RX: I2S stopped while audio_playing=true — restarting (seq=%lu)",
+                         (unsigned long)seq);
+                audio_output_start();
+                written = audio_output_write(rx_pcm_buffer, samples, 20);
+            } else {
+                ESP_LOGW(TAG, "RX write timeout (seq=%lu, opus_len=%u)",
+                         (unsigned long)seq, (unsigned)opus_len);
+            }
         }
     } else {
         ESP_LOGW(TAG, "RX decode failed: samples=%d (opus_len=%u, seq=%lu)",
@@ -591,6 +598,12 @@ static void play_fallback_beep(void)
 
     ESP_LOGI(TAG, "Beep: stopping I2S output (%d/10 frames written)", frames_written);
     audio_output_stop();
+    // Flush RX queue again — packets arriving during beep must not re-acquire the channel
+    if (rx_audio_queue) { xQueueReset(rx_audio_queue); }
+    // Reset RX audio state — play task may have set audio_playing during beep
+    audio_playing = false;
+    has_current_sender = false;
+    sequence_initialized = false;
 
     // Flush AEC reference: local beep audio must not contaminate the next TX's
     // AEC reference queue, which would cause voice cancellation artefacts.
@@ -601,6 +614,30 @@ static void play_fallback_beep(void)
 
     uint32_t beep_elapsed = (xTaskGetTickCount() - beep_start) * portTICK_PERIOD_MS;
     ESP_LOGI(TAG, "Beep: complete in %lums (hub chime incoming via UDP)", (unsigned long)beep_elapsed);
+}
+
+// === Test API accessors ===
+
+/**
+ * Report whether the audio play task is currently active.
+ */
+bool main_is_audio_playing(void) { return audio_playing; }
+
+/**
+ * Return the current depth of the RX audio queue.
+ */
+UBaseType_t main_get_rx_queue_depth(void) {
+    return rx_audio_queue ? uxQueueMessagesWaiting(rx_audio_queue) : 0;
+}
+
+/**
+ * Trigger a test beep at full volume (unmutes, plays beep, restores volume).
+ * Wraps the static play_fallback_beep() so it is callable from webserver.c.
+ */
+void main_trigger_test_beep(void) {
+    audio_output_force_unmute_max_volume();
+    play_fallback_beep();
+    audio_output_restore_volume();
 }
 
 /**
@@ -643,7 +680,9 @@ static void play_incoming_call_chime(void)
     vTaskDelay(pdMS_TO_TICKS(150));
 
     UBaseType_t q_depth = rx_audio_queue ? uxQueueMessagesWaiting(rx_audio_queue) : 0;
-    bool hub_chime_active = audio_playing || q_depth > 0;
+    // has_current_sender catches the race where the play task has acquired the
+    // channel (started decoding) but hasn't set audio_playing yet.
+    bool hub_chime_active = audio_playing || q_depth > 0 || has_current_sender;
 
     ESP_LOGI(TAG, "Call chime: audio_playing=%d, q_depth=%u, has_sender=%d -> %s",
              audio_playing, (unsigned)q_depth, has_current_sender,
@@ -889,7 +928,7 @@ static void on_cycle_long_press(void)
         // Call all discovered rooms at once
         int count = ha_mqtt_send_call_all_rooms();
         if (count > 0) {
-            last_call_sent_time = xTaskGetTickCount();  // Start PTT lockout
+            last_call_sent_time = xTaskGetTickCount() | 1;  // Start PTT lockout (| 1 ensures non-zero sentinel)
             display_show_message("Calling all...", 1500);
             ESP_LOGI(TAG, "Sent call to all rooms (%d devices)", count);
         } else {
@@ -901,7 +940,7 @@ static void on_cycle_long_press(void)
 
     // Send call to specific target (works for ESP32s and mobiles)
     ha_mqtt_send_call(target);
-    last_call_sent_time = xTaskGetTickCount();  // Start PTT lockout
+    last_call_sent_time = xTaskGetTickCount() | 1;  // Start PTT lockout (| 1 ensures non-zero sentinel)
     display_show_message("Calling...", 1500);
     ESP_LOGI(TAG, "Sent call to %s", target);
 }
@@ -1192,8 +1231,20 @@ void app_main(void)
         // Check for incoming calls
         char caller_name[32];
         if (ha_mqtt_check_incoming_call(caller_name)) {
-            ESP_LOGI(TAG, "Incoming call from: %s", caller_name);
-            play_incoming_call_chime();
+            // Self-exclusion guard: when "All Rooms" is selected and we just sent
+            // the call ourselves, our own MQTT message bounces back to us via the
+            // broker.  Suppress the chime for CALL_TX_LOCKOUT_MS (2s) so we don't
+            // ring our own chime.
+            TickType_t now_ticks = xTaskGetTickCount();
+            bool self_sent = (last_call_sent_time != 0) &&
+                             ((now_ticks - last_call_sent_time) * portTICK_PERIOD_MS < CALL_TX_LOCKOUT_MS);
+            if (self_sent) {
+                ESP_LOGI(TAG, "Ignoring call from '%s' — self-sent within %dms lockout",
+                         caller_name, CALL_TX_LOCKOUT_MS);
+            } else {
+                ESP_LOGI(TAG, "Incoming call from: %s", caller_name);
+                play_incoming_call_chime();
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(100));

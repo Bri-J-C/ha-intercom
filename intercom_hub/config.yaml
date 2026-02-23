@@ -21,7 +21,7 @@ options:
   mqtt_user: ""
   mqtt_password: ""
   device_name: "Intercom Hub"
-  multicast_group: "224.0.0.100"
+  multicast_group: "239.255.0.100"
   multicast_port: 5005
   piper_host: "core-piper"
   piper_port: 10200

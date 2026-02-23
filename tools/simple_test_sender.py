@@ -10,7 +10,7 @@ import time
 import sys
 
 # Protocol constants
-MULTICAST_GROUP = "224.0.0.100"
+MULTICAST_GROUP = "239.255.0.100"
 AUDIO_PORT = 5005
 DEVICE_ID = b'\x00\x01\x02\x03\x04\x05\x06\x07'
 

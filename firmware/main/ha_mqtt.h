@@ -171,21 +171,16 @@ bool ha_mqtt_is_device_mobile(int index);
 bool ha_mqtt_is_target_mobile(void);
 
 /**
- * Send call notification for mobile target.
- * Call this when PTT starts with a mobile target.
- */
-void ha_mqtt_notify_mobile_call(void);
-
-/**
  * Send call notification to any target device.
  * @param target_room Room name to call (can't be "All Rooms")
  */
 void ha_mqtt_send_call(const char *target_room);
 
 /**
- * Send call notification to ALL discovered rooms simultaneously (excluding self).
- * Iterates discovered_devices and calls ha_mqtt_send_call() for each available device.
- * @return number of devices called (0 if none available)
+ * Send call notification to ALL rooms via a single "All Rooms" MQTT message.
+ * All ESP32s match "All Rooms" and trigger their chime simultaneously.
+ * The calling device suppresses its own chime via the main loop's self-exclusion guard.
+ * @return number of available non-self devices (0 if none available — call not sent)
  */
 int ha_mqtt_send_call_all_rooms(void);
 
@@ -195,5 +190,11 @@ int ha_mqtt_send_call_all_rooms(void);
  * @return true if there's a pending call (clears the flag)
  */
 bool ha_mqtt_check_incoming_call(char *caller_name);
+
+/**
+ * Get the chime name from the most recently received call notification.
+ * Returns an empty string if no chime was specified.
+ */
+const char* ha_mqtt_get_incoming_chime(void);
 
 #endif // HA_MQTT_H

@@ -202,6 +202,16 @@ esp_err_t network_init(const char *ssid, const char *password)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    // Disable WiFi power save — ESP-IDF default (WIFI_PS_MIN_MODEM) causes
+    // the radio to sleep between DTIM beacons, dropping 80-95% of multicast
+    // packets.  Wall-powered intercoms don't need power saving.
+    esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ps_err == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi power save DISABLED for multicast reliability");
+    } else {
+        ESP_LOGW(TAG, "Failed to disable WiFi power save: %s", esp_err_to_name(ps_err));
+    }
+
     // Create TX socket
     tx_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (tx_socket < 0) {

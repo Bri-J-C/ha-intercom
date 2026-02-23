@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "cJSON.h"
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -70,6 +71,7 @@ static const char *call_topic = "intercom/call";  // Call notifications
 // Incoming call state
 static bool incoming_call_pending = false;
 static char incoming_call_caller[32] = "";
+static char incoming_call_chime[64] = "";
 
 // Callback for settings changes from HA
 static ha_mqtt_callback_t user_callback = NULL;
@@ -936,11 +938,19 @@ static void handle_mqtt_data(esp_mqtt_event_handle_t event)
             const settings_t *cfg = settings_get();
             ESP_LOGI(TAG, "Call target='%s', our room='%s'", target, cfg->room_name);
 
-            // Check if we're the target
-            if (strcmp(target, cfg->room_name) == 0) {
+            // Check if we're the target: match our room name OR "All Rooms" / "all"
+            if (strcmp(target, cfg->room_name) == 0 ||
+                strcasecmp(target, "All Rooms") == 0 ||
+                strcasecmp(target, "all") == 0) {
                 ESP_LOGI(TAG, "Incoming call from: %s - triggering chime", caller);
                 strncpy(incoming_call_caller, caller, sizeof(incoming_call_caller) - 1);
                 incoming_call_pending = true;
+
+                char chime_name[64] = {0};
+                if (extract_json_string(data, "chime", chime_name, sizeof(chime_name)) && chime_name[0]) {
+                    strncpy(incoming_call_chime, chime_name, sizeof(incoming_call_chime) - 1);
+                    ESP_LOGI(TAG, "Expected chime: '%s'", incoming_call_chime);
+                }
 
                 if (user_callback) {
                     user_callback(HA_CMD_CALL, 0);
@@ -1286,41 +1296,6 @@ bool ha_mqtt_is_target_mobile(void)
     return false;
 }
 
-void ha_mqtt_notify_mobile_call(void)
-{
-    if (!mqtt_connected || !mqtt_client) return;
-
-    const settings_t *cfg = settings_get();
-
-    // Find the mobile device's notify service
-    char notify_service[64] = "";
-    for (int i = 0; i < discovered_count; i++) {
-        if (discovered_devices[i].active &&
-            strcmp(discovered_devices[i].room, current_target) == 0 &&
-            discovered_devices[i].is_mobile) {
-            // Extract notify service from device id (e.g., "intercom_xxx_mobile_0")
-            // The hub will handle the actual service lookup
-            snprintf(notify_service, sizeof(notify_service), "mobile_app_%s",
-                     discovered_devices[i].room);
-            break;
-        }
-    }
-
-    // Publish call notification
-    cJSON *call = cJSON_CreateObject();
-    cJSON_AddStringToObject(call, "target", current_target);
-    cJSON_AddStringToObject(call, "caller", cfg->room_name);
-    cJSON_AddNumberToObject(call, "timestamp", (double)esp_log_timestamp() / 1000.0);
-
-    char *json_str = cJSON_PrintUnformatted(call);
-    if (json_str) {
-        esp_mqtt_client_publish(mqtt_client, "intercom/call", json_str, 0, 0, 0);
-        ESP_LOGI(TAG, "Sent mobile call notification to %s", current_target);
-        free(json_str);
-    }
-    cJSON_Delete(call);
-}
-
 void ha_mqtt_send_call(const char *target_room)
 {
     if (!mqtt_connected || !mqtt_client || !target_room) return;
@@ -1345,21 +1320,34 @@ void ha_mqtt_send_call(const char *target_room)
 int ha_mqtt_send_call_all_rooms(void)
 {
     if (!mqtt_connected || !mqtt_client) return 0;
+    const settings_t *cfg = settings_get();
 
-    int call_count = 0;
+    // Count available (non-self) devices so the caller knows how many will ring
+    int count = 0;
     for (int i = 0; i < discovered_count; i++) {
         if (!discovered_devices[i].active) continue;
         if (!discovered_devices[i].available) continue;
-
-        // Skip self — don't ring our own chime
-        if (strcmp(discovered_devices[i].id, unique_id) == 0) continue;
-
-        ha_mqtt_send_call(discovered_devices[i].room);
-        call_count++;
+        if (strcmp(discovered_devices[i].room, cfg->room_name) == 0) continue;
+        count++;
     }
 
-    ESP_LOGI(TAG, "Sent call to all rooms (%d devices)", call_count);
-    return call_count;
+    if (count == 0) return 0;
+
+    // Publish a single "All Rooms" message so every ESP32 receives it at
+    // approximately the same time — eliminates the per-device publish race
+    // condition that caused some devices to miss the 150ms chime-detection window.
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "target", "All Rooms");
+    cJSON_AddStringToObject(call, "caller", cfg->room_name);
+    char *json_str = cJSON_PrintUnformatted(call);
+    if (json_str) {
+        esp_mqtt_client_publish(mqtt_client, "intercom/call", json_str, 0, 0, 0);
+        ESP_LOGI(TAG, "Call all rooms: %s -> All Rooms (%d devices available)",
+                 cfg->room_name, count);
+        free(json_str);
+    }
+    cJSON_Delete(call);
+    return count;
 }
 
 bool ha_mqtt_check_incoming_call(char *caller_name)
@@ -1375,6 +1363,13 @@ bool ha_mqtt_check_incoming_call(char *caller_name)
     // Clear pending state
     incoming_call_pending = false;
     incoming_call_caller[0] = '\0';
+    incoming_call_chime[0] = '\0';
 
     return true;
 }
+
+/**
+ * Get the chime name from the most recently received call notification.
+ * Returns an empty string if no chime was specified.
+ */
+const char* ha_mqtt_get_incoming_chime(void) { return incoming_call_chime; }

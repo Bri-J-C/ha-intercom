@@ -5,7 +5,7 @@ DOMAIN = "ha_intercom"
 # Network configuration (must match firmware/protocol.py)
 CONTROL_PORT = 5004
 AUDIO_PORT = 5005
-MULTICAST_GROUP = "224.0.0.100"
+MULTICAST_GROUP = "239.255.0.100"
 
 # Discovery
 HEARTBEAT_INTERVAL = 30  # seconds

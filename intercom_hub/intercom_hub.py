@@ -145,7 +145,7 @@ def html_escape(text: str) -> str:
 
 
 # Version - single source of truth
-VERSION = "2.2.1"  # Trail-out priority fix, idle notification timing
+VERSION = "2.5.1"  # Add chime name to call MQTT payloads for ESP32 logging
 
 try:
     from aiohttp import web
@@ -165,7 +165,7 @@ MQTT_PORT = int(os.environ.get('MQTT_PORT', '1883'))
 MQTT_USER = os.environ.get('MQTT_USER', '')
 MQTT_PASSWORD = os.environ.get('MQTT_PASSWORD', '')
 DEVICE_NAME = os.environ.get('DEVICE_NAME', 'Intercom Hub')
-MULTICAST_GROUP = os.environ.get('MULTICAST_GROUP', '224.0.0.100')
+MULTICAST_GROUP = os.environ.get('MULTICAST_GROUP', '239.255.0.100')
 MULTICAST_PORT = int(os.environ.get('MULTICAST_PORT', '5005'))
 PIPER_HOST = os.environ.get('PIPER_HOST', '') or 'core-piper'
 _piper_port = os.environ.get('PIPER_PORT', '') or '10200'
@@ -262,7 +262,10 @@ web_event_loop = None  # Event loop for async web operations
 web_tx_lock = None  # Async lock to serialize web PTT transmissions (created at runtime)
 INGRESS_PORT = int(os.environ.get('INGRESS_PORT', '8099'))
 WWW_PATH = Path(__file__).parent / 'www'
-CHIMES_PATH = Path(__file__).parent / 'chimes'
+# Chimes live in /data/chimes (persistent across rebuilds).
+# Bundled defaults are in /chimes (baked into the container image).
+CHIMES_PATH = Path('/data/chimes')
+BUNDLED_CHIMES_PATH = Path(__file__).parent / 'chimes'
 
 # Mobile devices config and topics
 MOBILE_DEVICES = []  # List of {"name": "...", "notify_service": "..."}
@@ -280,6 +283,65 @@ current_audio_sender = None  # The device_id hex string of current transmitter
 
 # Reusable Opus encoder for TTS/media broadcast (lazily initialized)
 tts_encoder = None
+
+
+# =============================================================================
+# Multicast Metrics
+# =============================================================================
+
+class MulticastMetrics:
+    """Track multicast TX/RX packet statistics for debugging audio issues."""
+
+    def __init__(self):
+        self.tx_packets = 0
+        self.tx_errors = 0
+        self.rx_packets = 0
+        self.sequence_gaps = 0
+        self.duplicates = 0
+        self._sender_seqs: Dict[str, int] = {}  # sender_id_hex -> last sequence
+        self._lock = threading.Lock()
+        self._last_report = time.monotonic()
+
+    def record_tx(self, success: bool = True):
+        with self._lock:
+            if success:
+                self.tx_packets += 1
+            else:
+                self.tx_errors += 1
+
+    def record_rx(self, sender_id_hex: str, sequence: int):
+        with self._lock:
+            self.rx_packets += 1
+            last_seq = self._sender_seqs.get(sender_id_hex)
+            if last_seq is not None:
+                if sequence == last_seq:
+                    self.duplicates += 1
+                elif sequence > last_seq + 1:
+                    self.sequence_gaps += sequence - last_seq - 1
+            self._sender_seqs[sender_id_hex] = sequence
+
+    def maybe_log_report(self, interval: float = 60.0):
+        """Log a summary every `interval` seconds. Call from any thread."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_report < interval:
+                return
+            tx_p, tx_e = self.tx_packets, self.tx_errors
+            rx_p, gaps, dupes = self.rx_packets, self.sequence_gaps, self.duplicates
+            # Reset counters for next window
+            self.tx_packets = self.tx_errors = 0
+            self.rx_packets = self.sequence_gaps = self.duplicates = 0
+            self._sender_seqs.clear()
+            self._last_report = now
+
+        log.info(
+            f"Multicast stats (60s): TX {tx_p} sent / {tx_e} errors, "
+            f"RX {rx_p} received / {gaps} gaps / {dupes} dupes"
+        )
+
+
+mcast_metrics = MulticastMetrics()
+
 
 # Chime state: pre-encoded chime frames, keyed by chime name (e.g. "doorbell")
 # Loaded at startup; each entry is a list of Opus-encoded bytes objects.
@@ -601,6 +663,9 @@ def create_tx_socket():
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
     # Disable multicast loopback - prevent receiving our own packets
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+    # NOTE: No IP_MULTICAST_IF — HA add-on containers route through Docker
+    # bridge (172.30.x.x) even with host_network=true.  Letting the kernel
+    # pick the interface via INADDR_ANY works correctly with host_network.
     return sock
 
 
@@ -609,10 +674,13 @@ def create_rx_socket():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+    # Increase receive buffer for burst absorption (64KB holds ~325 frames)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+
     # Bind to the multicast port
     sock.bind(('', MULTICAST_PORT))
 
-    # Join multicast group
+    # Join multicast group (INADDR_ANY lets the kernel pick the interface)
     mreq = struct.pack('4sl', socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
@@ -648,9 +716,13 @@ def send_audio_packet(opus_data, target_ip=None, priority=None):
             tx_socket.sendto(packet, (target_ip, MULTICAST_PORT))
         else:
             tx_socket.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
+        mcast_metrics.record_tx(success=True)
     except Exception as e:
+        mcast_metrics.record_tx(success=False)
         mode = f"unicast to {target_ip}" if target_ip else "multicast"
         log.error(f"sending {mode}: {e}")
+
+    mcast_metrics.maybe_log_report()
 
 
 def get_target_ip():
@@ -777,6 +849,10 @@ def receive_thread():
 
             sender_id_str = sender_id.hex()
             sequence = struct.unpack('>I', data[8:12])[0]
+
+            # Track multicast metrics
+            mcast_metrics.record_rx(sender_id_str, sequence)
+            mcast_metrics.maybe_log_report()
 
             # Extract priority byte (byte 12, added in v2.5.0)
             # Old firmware (12-byte header) also handled gracefully
@@ -1201,6 +1277,19 @@ def load_chime(filepath: Path) -> list:
     return frames
 
 
+def _seed_persistent_chimes() -> None:
+    """Copy bundled default chimes to persistent /data/chimes if not already present."""
+    import shutil
+    CHIMES_PATH.mkdir(parents=True, exist_ok=True)
+    if not BUNDLED_CHIMES_PATH.exists():
+        return
+    for wav in BUNDLED_CHIMES_PATH.glob('*.wav'):
+        dest = CHIMES_PATH / wav.name
+        if not dest.exists():
+            shutil.copy2(wav, dest)
+            log.info(f"Copied bundled chime to persistent storage: {wav.name}")
+
+
 def load_all_chimes() -> None:
     """Scan the chimes directory and pre-encode all WAV files into memory.
 
@@ -1208,6 +1297,9 @@ def load_all_chimes() -> None:
     Results are stored in the module-level `loaded_chimes` dict.
     """
     global loaded_chimes
+
+    # Ensure persistent dir exists and seed with bundled defaults
+    _seed_persistent_chimes()
 
     if not CHIMES_PATH.exists():
         log.warning(f"Chimes directory not found: {CHIMES_PATH}")
@@ -1230,20 +1322,74 @@ def load_all_chimes() -> None:
     log.info(f"Total chimes loaded: {len(loaded_chimes)} ({', '.join(loaded_chimes.keys())})")
 
 
+def _stream_chime_blocking(target_ip: Optional[str], frames: list, chime_name: str) -> None:
+    """Stream chime frames with precise timing (runs in a thread).
+
+    Uses the same coarse-sleep + busy-wait pattern as encode_and_broadcast()
+    for <1ms timing accuracy.  Runs via loop.run_in_executor() so it doesn't
+    block the asyncio event loop.
+    """
+    chime_seq = 0
+    frame_interval = FRAME_DURATION_MS / 1000.0  # 0.020
+    start_time = time.monotonic()
+    consecutive_errors = 0
+    first_frame_sent = False
+
+    for i, opus_frame in enumerate(frames):
+        packet = DEVICE_ID + struct.pack('>IB', chime_seq, PRIORITY_HIGH) + opus_frame
+        chime_seq += 1
+
+        try:
+            if target_ip:
+                tx_socket.sendto(packet, (target_ip, MULTICAST_PORT))
+            else:
+                tx_socket.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
+            if not first_frame_sent:
+                first_frame_sent = True
+                log.debug(
+                    f"Chime '{chime_name}' first frame sent at t+{(time.monotonic()-start_time)*1000:.1f}ms"
+                )
+            mcast_metrics.record_tx(success=True)
+            consecutive_errors = 0
+        except Exception as e:
+            mcast_metrics.record_tx(success=False)
+            consecutive_errors += 1
+            log.error(f"Chime send error at frame {i}: {e}")
+            if consecutive_errors >= 5:
+                log.error("Chime aborted: 5 consecutive send errors")
+                break
+            continue
+
+        # Calculate target time for next frame
+        next_frame_time = start_time + ((i + 1) * frame_interval)
+
+        # Coarse sleep (to within 3ms of target)
+        now = time.monotonic()
+        sleep_time = next_frame_time - now - 0.003
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
+        # Fine-grained busy-wait for precise timing
+        while time.monotonic() < next_frame_time:
+            pass
+
+    elapsed = time.monotonic() - start_time
+    expected = len(frames) * frame_interval
+    drift_ms = (elapsed - expected) * 1000
+    log.info(f"Chime '{chime_name}' complete: {chime_seq} frames in {elapsed:.2f}s (drift: {drift_ms:+.1f}ms)")
+
+
 async def stream_chime_to_target(target_ip: Optional[str], chime_name: str = "") -> None:
     """Stream pre-encoded chime frames to a target device (or multicast).
 
-    Sends each Opus frame as a normal audio packet at 20ms intervals (slightly
-    faster at 18ms to avoid gaps caused by scheduling jitter). Uses
-    PRIORITY_HIGH so the chime preempts any ongoing NORMAL transmission on the
-    target device, but does not use PRIORITY_EMERGENCY to avoid forcing max
-    volume.
+    Delegates to _stream_chime_blocking() in a thread for precise timing
+    (coarse-sleep + busy-wait, same pattern as encode_and_broadcast).
+    Uses PRIORITY_HIGH so the chime preempts ongoing NORMAL transmissions.
 
     Args:
         target_ip: Unicast destination IP, or None for multicast (All Rooms).
-        chime_name: Which chime to play. Falls back to 'doorbell' if not found.
+        chime_name: Which chime to play. Falls back to first available if not found.
     """
-    # Resolve chime: try requested name, then first available, then give up
     frames = loaded_chimes.get(chime_name)
     if not frames:
         frames = next(iter(loaded_chimes.values()), None)
@@ -1256,29 +1402,8 @@ async def stream_chime_to_target(target_ip: Optional[str], chime_name: str = "")
         f"{'multicast' if target_ip is None else target_ip}"
     )
 
-    # Use a sequence counter isolated from the main sequence_num so chime
-    # packets don't disrupt the TTS/PTT sequence continuity
-    chime_seq = 0
-
-    frame_interval = 0.018  # 18ms — slightly fast to avoid inter-frame gaps
-
-    for i, opus_frame in enumerate(frames):
-        # Build packet: device_id (8) + sequence (4, big-endian) + priority (1) + opus
-        packet = DEVICE_ID + struct.pack('>IB', chime_seq, PRIORITY_HIGH) + opus_frame
-        chime_seq += 1
-
-        try:
-            if target_ip:
-                tx_socket.sendto(packet, (target_ip, MULTICAST_PORT))
-            else:
-                tx_socket.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
-        except Exception as e:
-            log.error(f"Chime send error at frame {i}: {e}")
-            break
-
-        await asyncio.sleep(frame_interval)
-
-    log.debug(f"Chime stream complete: {len(frames)} frames sent")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _stream_chime_blocking, target_ip, frames, chime_name)
 
 
 def get_chime_options() -> list:
@@ -2020,6 +2145,13 @@ def on_mqtt_message(client, userdata, msg):
         # The chime is streamed from the hub so ESP32 devices no longer need local PCM data.
         try:
             data = json.loads(payload)
+
+            # Skip calls that originated from this hub (via WebSocket) to prevent
+            # double-streaming: the WS call handler already streams the chime and
+            # sends mobile notifications before publishing to MQTT.
+            if data.get("source") == "hub":
+                return
+
             target = sanitize_room_name(data.get("target", ""))
             caller = sanitize_room_name(data.get("caller", "Intercom")) or "Intercom"
 
@@ -2033,20 +2165,31 @@ def on_mqtt_message(client, userdata, msg):
             target_lower = target.lower()
             if target_lower in ("all rooms", "all"):
                 chime_target_ip = None
+                # Send mobile notifications for all mobile devices when caller is an ESP32
+                for dev_info in discovered_devices.values():
+                    room = dev_info.get("room", "")
+                    if room and is_mobile_device(room) and room != caller:
+                        send_mobile_notification(room, caller)
             else:
-                chime_target_ip = None  # Default to multicast if IP not found
+                chime_target_ip = None
                 for dev_info in discovered_devices.values():
                     if dev_info.get("room") == target:
                         chime_target_ip = dev_info.get("ip")
                         break
+                if chime_target_ip is None:
+                    log.warning(f"Chime for '{target}' skipped: target IP not found in discovered devices")
+                    return  # Don't accidentally multicast a single-target call
 
             # Stream chime in background (async coroutine scheduled on the web event loop).
             # Capture chime_name and target_ip by value to avoid closure/late-binding issues.
             if loaded_chimes and web_event_loop is not None:
                 _chime_name = current_chime   # Snapshot at dispatch time
                 _target_ip = chime_target_ip  # Already a local variable
+                _t_dispatch = time.monotonic()
 
-                def _schedule_chime(_cn=_chime_name, _ip=_target_ip):
+                def _schedule_chime(_cn=_chime_name, _ip=_target_ip, _t=_t_dispatch):
+                    lag_ms = (time.monotonic() - _t) * 1000
+                    log.debug(f"Chime dispatch lag: {lag_ms:.1f}ms (MQTT->UDP)")
                     asyncio.run_coroutine_threadsafe(
                         stream_chime_to_target(_ip, _cn),
                         web_event_loop
@@ -2057,8 +2200,8 @@ def on_mqtt_message(client, userdata, msg):
             else:
                 log.debug("Chime not streamed: no chimes loaded or event loop unavailable")
 
-            # Mobile notification (push alert) if target is a mobile device
-            if is_mobile_device(target):
+            # Mobile notification (push alert) if target is a mobile device (single-room call)
+            if target_lower not in ("all rooms", "all") and is_mobile_device(target):
                 send_mobile_notification(target, caller)
 
         except json.JSONDecodeError:
@@ -2125,7 +2268,7 @@ def on_mqtt_disconnect(client, userdata, disconnect_flags, reason_code, properti
 
 async def websocket_handler(request):
     """Handle WebSocket connections for web PTT."""
-    global web_ptt_active, web_ptt_encoder, current_state
+    global web_ptt_active, web_ptt_encoder, current_state, current_chime
 
     log.debug(f"WebSocket connection request from {request.remote}")
     ws = web.WebSocketResponse()
@@ -2363,35 +2506,84 @@ async def websocket_handler(request):
                         safe_caller = sanitize_string(caller_name, MAX_ROOM_NAME_LENGTH)
 
                         if raw_target in ('all', 'All Rooms'):
-                            # Call all discovered rooms simultaneously, skipping the caller
+                            # Single MQTT message so all ESP32s receive it simultaneously —
+                            # eliminates the per-device publish race condition where later
+                            # messages arrive after the 150ms chime-detection window.
                             rooms_called = []
+                            call_data = {
+                                "target": "All Rooms",
+                                "caller": safe_caller,
+                                "source": "hub",
+                                "chime": current_chime
+                            }
+                            _t_mqtt = time.monotonic()
+                            mqtt_client.publish(MOBILE_CALL_TOPIC, json.dumps(call_data))
+                            log.debug(f"Call all rooms MQTT published at t=0 (wall: {_t_mqtt:.3f})")
+
+                            # Collect room names for logging; send mobile notifications separately
                             for dev in list(discovered_devices.values()):
                                 room = dev.get('room', '')
                                 if not room or room == caller_name:
                                     continue
-                                call_data = {
-                                    "target": room,
-                                    "caller": safe_caller
-                                }
-                                mqtt_client.publish(MOBILE_CALL_TOPIC, json.dumps(call_data))
                                 if is_mobile_device(room):
                                     send_mobile_notification(room, caller_name)
                                 rooms_called.append(room)
+
+                            # Single multicast chime — all devices on the group receive it
+                            if loaded_chimes and web_event_loop is not None:
+                                _cn = current_chime
+                                _t_chime = time.monotonic()
+                                log.debug(
+                                    f"Chime stream start: {(_t_chime - _t_mqtt)*1000:.1f}ms after MQTT publish"
+                                )
+                                asyncio.run_coroutine_threadsafe(
+                                    stream_chime_to_target(None, _cn),
+                                    web_event_loop
+                                )
                             log.info(f"Call all rooms: {caller_name} -> {rooms_called}")
                         elif target:
-                            # Send call notification via MQTT (ESP32s and hub listen)
+                            # Send call notification via MQTT (ESP32s listen)
                             call_data = {
                                 "target": target,
-                                "caller": safe_caller
+                                "caller": safe_caller,
+                                "source": "hub",
+                                "chime": current_chime
                             }
                             mqtt_client.publish(MOBILE_CALL_TOPIC, json.dumps(call_data))
                             log.info(f"Call: {caller_name} -> {target}")
+
+                            # Stream chime to target
+                            if loaded_chimes and web_event_loop is not None:
+                                chime_target_ip = None
+                                for dev_info in discovered_devices.values():
+                                    if dev_info.get("room") == target:
+                                        chime_target_ip = dev_info.get("ip")
+                                        break
+                                if chime_target_ip is None:
+                                    log.warning(f"Chime for '{target}' skipped: target IP not found")
+                                else:
+                                    _cn = current_chime
+                                    _ip = chime_target_ip
+                                    asyncio.run_coroutine_threadsafe(
+                                        stream_chime_to_target(_ip, _cn),
+                                        web_event_loop
+                                    )
 
                             # Also send mobile notification if target is mobile
                             if is_mobile_device(target):
                                 send_mobile_notification(target, caller_name)
                         elif raw_target:
                             log.warning(f"Invalid call target rejected: {repr(str(raw_target)[:20])}")
+
+                    elif msg_type == 'set_chime':
+                        # Change active chime from web UI
+                        new_chime = sanitize_string(data.get('chime', ''), 64).strip()
+                        if new_chime in loaded_chimes:
+                            current_chime = new_chime
+                            publish_chime()
+                            log.info(f"Chime set via web: {current_chime}")
+                        else:
+                            log.warning(f"Chime '{new_chime}' not found")
 
                 except json.JSONDecodeError:
                     pass
@@ -2527,13 +2719,134 @@ async def static_handler(request):
         raise web.HTTPNotFound()
 
 
+# =============================================================================
+# Chime Management API
+# =============================================================================
+
+MAX_CHIME_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB
+
+# Allowed chime filename pattern: alphanumeric, dashes, underscores
+SAFE_CHIME_NAME = re.compile(r'^[\w\-]+$')
+
+
+async def chimes_list_handler(request):
+    """GET /api/chimes — list available chimes with metadata."""
+    chimes = []
+    for name, frames in sorted(loaded_chimes.items()):
+        duration = len(frames) * FRAME_DURATION_MS / 1000.0
+        chimes.append({
+            "name": name,
+            "frames": len(frames),
+            "duration": round(duration, 2),
+        })
+    return web.json_response({
+        "chimes": chimes,
+        "current": current_chime,
+    })
+
+
+async def chimes_upload_handler(request):
+    """POST /api/chimes/upload — upload a WAV file as a new chime."""
+    global loaded_chimes
+
+    reader = await request.multipart()
+    field = await reader.next()
+
+    if field is None or field.name != 'file':
+        return web.json_response({"error": "Missing 'file' field"}, status=400)
+
+    filename = field.filename or ""
+    if not filename.lower().endswith('.wav'):
+        return web.json_response({"error": "Only .wav files are accepted"}, status=400)
+
+    # Derive chime name from filename stem
+    chime_name = Path(filename).stem.lower().replace(' ', '_')
+    if not SAFE_CHIME_NAME.match(chime_name):
+        return web.json_response({"error": "Invalid filename (use alphanumeric, dashes, underscores)"}, status=400)
+
+    # Read file data with size limit
+    data = bytearray()
+    while True:
+        chunk = await field.read_chunk(8192)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > MAX_CHIME_UPLOAD_SIZE:
+            return web.json_response({"error": f"File too large (max {MAX_CHIME_UPLOAD_SIZE // (1024*1024)}MB)"}, status=400)
+
+    if len(data) < 44:  # WAV header is at least 44 bytes
+        return web.json_response({"error": "File too small to be a valid WAV"}, status=400)
+
+    # Ensure chimes directory exists
+    CHIMES_PATH.mkdir(parents=True, exist_ok=True)
+
+    # Save the WAV file
+    dest = CHIMES_PATH / f"{chime_name}.wav"
+    dest.write_bytes(bytes(data))
+    log.info(f"Chime uploaded: '{chime_name}' ({len(data)} bytes) -> {dest}")
+
+    # Encode to Opus frames
+    frames = load_chime(dest)
+    if not frames:
+        dest.unlink(missing_ok=True)
+        return web.json_response({"error": "Failed to encode WAV (invalid format or codec error)"}, status=400)
+
+    loaded_chimes[chime_name] = frames
+
+    # Update HA select entity with new option
+    publish_chime_select()
+
+    duration = len(frames) * FRAME_DURATION_MS / 1000.0
+    return web.json_response({
+        "name": chime_name,
+        "frames": len(frames),
+        "duration": round(duration, 2),
+    })
+
+
+async def chimes_delete_handler(request):
+    """DELETE /api/chimes/{name} — delete a chime WAV file."""
+    global loaded_chimes, current_chime
+
+    name = request.match_info.get('name', '')
+    if not name or not SAFE_CHIME_NAME.match(name):
+        return web.json_response({"error": "Invalid chime name"}, status=400)
+
+    if name == "doorbell":
+        return web.json_response({"error": "Cannot delete the default 'doorbell' chime"}, status=400)
+
+    if name not in loaded_chimes:
+        return web.json_response({"error": f"Chime '{name}' not found"}, status=404)
+
+    # Remove from memory
+    del loaded_chimes[name]
+
+    # Delete WAV file
+    wav_file = CHIMES_PATH / f"{name}.wav"
+    wav_file.unlink(missing_ok=True)
+    log.info(f"Chime deleted: '{name}'")
+
+    # If deleted chime was active, switch to doorbell
+    if current_chime == name:
+        current_chime = "doorbell" if "doorbell" in loaded_chimes else next(iter(loaded_chimes), "doorbell")
+        publish_chime()
+
+    # Update HA select entity
+    publish_chime_select()
+
+    return web.json_response({"deleted": name, "current": current_chime})
+
+
 def create_web_app():
     """Create the aiohttp web application."""
-    app = web.Application()
+    app = web.Application(client_max_size=6 * 1024 * 1024)  # 6MB for chime uploads
 
     # Routes - order matters! Specific routes before wildcards
     # Use /ws instead of /api/websocket to avoid conflict with HA's WebSocket API
     app.router.add_get('/ws', websocket_handler)
+    app.router.add_get('/api/chimes', chimes_list_handler)
+    app.router.add_post('/api/chimes/upload', chimes_upload_handler)
+    app.router.add_delete('/api/chimes/{name}', chimes_delete_handler)
     app.router.add_get('/', index_handler)
     app.router.add_static('/static', WWW_PATH)
     app.router.add_get('/{filename:.*}', static_handler)

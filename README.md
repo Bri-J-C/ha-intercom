@@ -13,7 +13,9 @@ ESP32-S3-based multi-room intercom system with Home Assistant integration.
 - **OLED display** with room selector, settings page, and availability tracking
 - **Priority levels** (Normal, High, Emergency) with preemption
 - **Do Not Disturb** mode with emergency override
-- **Call notifications** with chime and LED flash
+- **Hub-managed chimes** — the hub streams WAV chime audio via UDP/Opus on incoming calls; ESP32 falls back to a local beep only when the hub is unreachable (150ms detection window)
+- **Chime management** — upload custom WAV chimes, select the active chime, and delete chimes via the web UI or HTTP API
+- **Self-exclusion guard** — ESP32 nodes suppress their own chime when they initiated the call
 - **Opus codec** at 32kbps VBR with PLC/FEC for packet loss recovery
 - **AGC** (Automatic Gain Control) for consistent mic levels
 - **AEC** (Acoustic Echo Cancellation) via ESP-SR
@@ -21,7 +23,9 @@ ESP32-S3-based multi-room intercom system with Home Assistant integration.
 - **OTA firmware updates** via web interface
 - **Reliable mDNS** with automatic re-enable on WiFi reconnect and 60-second periodic re-announcement
 - **DHCP hostname** registration so routers display the correct device name
-- **Audio reliability** improvements: decoupled RX receive/decode pipeline (15-deep queue + dedicated play task), reduced playback start latency (~40ms vs ~160ms), eliminated TX/RX buffer race conditions, silence-gated trail-out (200ms channel release vs 600ms), queue flush on PTT press to discard stale audio before transmitting, and thread-safe I2S state management via FreeRTOS mutex (eliminates TOCTOU race on start/stop/write)
+- **WiFi power save disabled** to prevent multicast packet loss
+- **Audio reliability** improvements: decoupled RX receive/decode pipeline (15-deep queue + dedicated play task), reduced playback start latency (~40ms vs ~160ms), eliminated TX/RX buffer race conditions, silence-gated trail-out (200ms channel release vs 600ms), queue flush on PTT press to discard stale audio before transmitting, thread-safe I2S state management via FreeRTOS mutex, and I2S restart recovery in the RX path
+- **Test API endpoints** — `GET /api/status` (JSON device state) and `POST /api/test` (trigger test beep) on each ESP32
 - **Mobile device** auto-discovery and notification routing
 - **TTS announcements** via Piper text-to-speech
 - **Home Assistant integration** with MQTT auto-discovery, services, and automations
@@ -40,6 +44,7 @@ graph TB
             HUB_WS["WebSocket Server<br/>audio + control<br/>client ID tracking"]
             HUB_ROUTE["Audio Router<br/>ESP32↔ESP32<br/>ESP32↔Web · Web↔Web<br/>TTS→all"]
             HUB_TTS["TTS Bridge<br/>Piper · channel-busy wait"]
+            HUB_CHIME["Chime Manager<br/>WAV upload/select/delete<br/>UDP stream on call"]
             HUB_CARD["Lovelace PTT Card<br/>intercom-ptt-card.js"]
         end
         MQTT <-->|"subscribe/publish"| HUB_MQTT
@@ -114,8 +119,8 @@ packet-beta
 | Directory | Description |
 |-----------|-------------|
 | `firmware/` | ESP32-S3 firmware (PlatformIO/ESP-IDF) |
-| `intercom_hub/` | Home Assistant add-on for PTT hub, TTS, and routing |
-| `tools/` | Python utilities: `test_node.py` (MQTT call + UDP audio test harness), `protocol.py` (shared protocol constants), `ptt_client.py` (desktop PTT client) |
+| `intercom_hub/` | Home Assistant add-on for PTT hub, TTS, chime management, and routing |
+| `tools/` | Python utilities: `test_node.py` (MQTT call + UDP audio test harness), `protocol.py` (shared protocol constants), `generate_chimes.py` (WAV chime generator), `ptt_client.py` (desktop PTT client) |
 
 ## Quick Start
 
@@ -163,6 +168,7 @@ Access the Web PTT interface through the **Intercom** panel in Home Assistant's 
 - Push-to-talk button with visual TX/RX state
 - Room/device selector dropdown
 - Call button to ring specific rooms
+- Chime management panel (upload WAV, select active chime, delete)
 - Works on desktop and mobile browsers
 
 ## Protocol
@@ -172,7 +178,7 @@ Access the Web PTT interface through the **Intercom** panel in Home Assistant's 
 | Property | Value |
 |----------|-------|
 | Transport | UDP |
-| Broadcast address | `224.0.0.100:5005` (multicast, all rooms) |
+| Broadcast address | `239.255.0.100:5005` (multicast, all rooms) |
 | Room-to-room | `<device-ip>:5005` (unicast) |
 | Loopback prevention | `IP_MULTICAST_LOOP=0` on TX socket (hub and firmware) |
 
