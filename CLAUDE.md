@@ -1,5 +1,8 @@
 # HA Intercom Project - Claude Code Context
 
+## Session Start
+At the start of every new conversation or after `/clear`, proactively read `MEMORY.md` from the auto-memory directory and give a brief status summary (current versions, uncommitted state, active tasks). Do this without being asked.
+
 ## Build/Deploy Commands
 
 ### Add-on (SSH to 10.0.0.8)
@@ -42,7 +45,7 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 - **Collision avoidance**: First-to-talk with 500ms timeout
 
 ### intercom_hub/ (Home Assistant Add-on, Python)
-- `intercom_hub.py` (v2.2.0): Main hub server
+- `intercom_hub.py` (v2.2.1): Main hub server
   - MQTT client for HA integration (auto-discovery, state sync, volume/mute/target control)
   - WebSocket server for web PTT clients (individual client tracking with client IDs)
   - Audio routing: ESP32<->ESP32, ESP32<->WebClient, WebClient<->WebClient, TTS->all
@@ -100,7 +103,7 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 - **PSRAM config**: `sdkconfig.esp32s3` controls PSRAM (not just `sdkconfig.defaults`). After sdkconfig changes, run `pio run -t fullclean` before building
 - **Encryption**: WiFi/MQTT/Web/AP passwords are AES-256-GCM encrypted in NVS. Key derived from eFuse MAC + salt via SHA-256. Backwards compatible with plaintext
 
-## Current Features (v2.2.0 hub / v2.7.1 firmware)
+## Current Features (v2.2.1 hub / v2.8.0 firmware)
 
 ### ESP32 Firmware
 - Push-to-talk via BOOT button with first-to-talk collision avoidance
@@ -122,17 +125,24 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 - WiFi AP fallback mode for initial setup
 - mDNS initialized before WiFi connect (catches `IP_EVENT_STA_GOT_IP`); re-enabled with `MDNS_EVENT_ENABLE_IP4` on reconnect; disabled with `MDNS_EVENT_DISABLE_IP4` on disconnect; 60s periodic re-announcement timer as safety net
 - DHCP hostname set via `esp_netif_set_hostname()` (routers show correct device name in client list)
+- Separate TX/RX PCM buffers (eliminated shared-buffer race condition between TX and RX tasks)
+- RX audio queue (15-deep FreeRTOS queue) + dedicated `audio_play_task` on PSRAM stack — decouples network receive from Opus decode/I2S write
+- DMA pre-fill on `audio_output_start()` reduced from 8 descriptors to 2 (~40ms start latency vs ~160ms)
+- I2S write timeout reduced to 20ms (one frame budget) — prevents RX task stalls
+- Sequence tracking reset on beep fallback to prevent stale state
+- `nextPlayTime` reset on AudioContext `suspend()`/`resume()` in web PTT client (prevents stale scheduling after context recreation)
 
 ### Hub Add-on
 - WebSocket-based Web PTT with individual client IDs and registration
 - Per-client state tracking (prevents all clients showing same state)
-- Priority routing with preemption support
+- Priority routing with preemption support (trail-out silence uses active PTT priority)
 - DND awareness with emergency override
 - Audio forwarding: ESP32<->Web, Web<->Web, TTS->Web+ESP32
 - Mobile device auto-discovery from HA companion apps
 - TTS with channel-busy waiting
 - Call/notify between all node types (ESP32, web, mobile)
 - Room selector dropdown with all discovered devices
+- Idle state broadcast sent before 750ms sleep so web clients see idle immediately
 - Custom Lovelace PTT card (intercom-ptt-card.js v1.2.0) with ingress and direct `hub_url` connection modes
 
 ### Web PTT (Browser)
@@ -161,9 +171,12 @@ Hub:     MQTT commands + WebSocket audio + TTS generation + Audio forwarding bet
 ## Important Implementation Notes
 
 ### Audio Buffer Architecture
-- DMA buffers: Managed internally by I2S driver (8 descriptors x FRAME_SIZE)
+- DMA buffers: Managed internally by I2S driver (8 descriptors x FRAME_SIZE); `audio_output_start()` pre-fills 2 descriptors (~40ms) to reduce start latency
 - Stereo conversion buffer: Dynamically allocated (PSRAM preferred, internal fallback)
 - Raw mic buffer: Dynamically allocated (PSRAM preferred, internal fallback)
+- TX and RX PCM buffers are now separate (no shared buffer between TX and RX tasks)
+- RX audio queue: 15-deep FreeRTOS queue; `audio_play_task` (PSRAM stack) dequeues and writes to I2S — decouples UDP receive from I2S write
+- I2S write timeout: 20ms (one frame budget) — prevents RX stalls without blocking the play task
 - Opus encoder/decoder state: ~36KB total, allocated in PSRAM when available
 - `esp_ptr_external_ram()` from `esp_memory_utils.h` to check if pointer is in PSRAM
 - `SPIRAM_IGNORE_NOTFOUND=y` ensures boards without PSRAM still boot
