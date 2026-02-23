@@ -21,7 +21,7 @@ ESP32-S3-based multi-room intercom system with Home Assistant integration.
 - **OTA firmware updates** via web interface
 - **Reliable mDNS** with automatic re-enable on WiFi reconnect and 60-second periodic re-announcement
 - **DHCP hostname** registration so routers display the correct device name
-- **Audio reliability** improvements: decoupled RX receive/decode pipeline, reduced playback start latency (~40ms vs ~160ms), and eliminated TX/RX buffer race conditions
+- **Audio reliability** improvements: decoupled RX receive/decode pipeline (15-deep queue + dedicated play task), reduced playback start latency (~40ms vs ~160ms), eliminated TX/RX buffer race conditions, silence-gated trail-out (200ms channel release vs 600ms), and queue flush on PTT press to discard stale audio before transmitting
 - **Mobile device** auto-discovery and notification routing
 - **TTS announcements** via Piper text-to-speech
 - **Home Assistant integration** with MQTT auto-discovery, services, and automations
@@ -86,13 +86,14 @@ flowchart LR
     subgraph RX["RX Path (Receive)"]
         direction LR
         UDP_RX["UDP RX<br/>port 5005"]
+        QUEUE["RX Queue<br/>(15-deep)<br/>decouples tasks"]
         DEC["Opus Decoder<br/>PLC + FEC<br/>(PSRAM)"]
         VOL["Volume<br/>Mute"]
         STEREO["Mono→Stereo"]
         I2S_OUT["I2S Bus 1"]
         SPK["MAX98357A<br/>Speaker"]
 
-        UDP_RX --> DEC --> VOL --> STEREO --> I2S_OUT --> SPK
+        UDP_RX --> QUEUE --> DEC --> VOL --> STEREO --> I2S_OUT --> SPK
     end
 ```
 
