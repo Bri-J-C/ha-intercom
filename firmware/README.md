@@ -27,6 +27,14 @@ PlatformIO-based firmware for the intercom satellite nodes.
 - RX audio queue (15-deep FreeRTOS queue) with dedicated `audio_play_task` on PSRAM stack — decouples network receive from Opus decode/I2S write
 - Reduced DMA pre-fill on audio start: 2 descriptors (~40ms latency) instead of 8 (~160ms)
 - I2S write timeout capped at 20ms (one frame budget) to prevent RX task stalls
+- Silence gate: Opus frames smaller than 10 bytes are treated as trail-out silence and do not acquire the audio channel or trigger RECEIVING state
+- Trail-out silence reduced from 30 frames (600ms) to 10 frames (200ms) for faster channel release after transmission ends
+- RX audio queue flushed via `xQueueReset()` on PTT press (both normal and preemption paths) to discard stale queued audio before transmitting
+- LED spinlock (`portMUX_TYPE`) in `button.c` makes `button_set_led_state()` safe to call from multiple tasks concurrently
+- Webserver `max_open_sockets` reduced from 7 to 3, freeing lwIP socket slots for MQTT and UDP
+- `SPIRAM_MALLOC_ALWAYSINTERNAL` reduced from 16384 to 4096: prevents internal RAM exhaustion that caused MQTT cycling when many sockets were active
+- `LWIP_MAX_SOCKETS` increased from 10 to 16 to accommodate concurrent UDP, mDNS, HTTP, and MQTT sockets
+- `SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`: non-DMA WiFi and lwIP structures use PSRAM, preserving internal RAM for time-critical allocations
 
 ## Hardware Requirements
 
