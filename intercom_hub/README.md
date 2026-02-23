@@ -61,6 +61,7 @@ Access via the **Intercom** panel in Home Assistant's sidebar. The add-on provid
 - Call button to ring specific rooms
 - Connection status and TX/RX state indicators
 - Device name input on first launch
+- AudioContext `nextPlayTime` reset on `suspend()`/`resume()` to prevent stale scheduling after the browser pauses and resumes the audio context
 
 ### TTS Announcements
 
@@ -96,7 +97,7 @@ The card connects to the hub via HA ingress by default (no extra configuration n
 
 ```yaml
 type: custom:intercom-ptt-card
-hub_url: "ws://10.0.0.8:8099/ws"   # Optional: bypass ingress, connect directly
+hub_url: "ws://<ha-ip>:8099/ws"   # Optional: bypass ingress, connect directly
 ```
 
 **v1.2.0 changes:** Fixed ingress WebSocket connection to use the add-on's stable ingress entry path (from `/addons/{slug}/info`) and set the ingress session cookie with the correct format matching the HA frontend (including the conditional `Secure` flag for HTTPS). Added `hub_url` direct connection option, inline SVG logo on the init overlay, centered header title via CSS grid, and card version indicator on the init overlay.
