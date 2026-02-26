@@ -1,0 +1,12 @@
+alias: "Claude Code Notification"
+description: "Forward MQTT notifications from Claude Code to Brian's phone"
+trigger:
+  - platform: mqtt
+    topic: "claude/notify"
+condition: []
+action:
+  - service: notify.mobile_app_brians_phone
+    data:
+      title: "{{ trigger.payload_json.title }}"
+      message: "{{ trigger.payload_json.message }}"
+mode: single

@@ -1,0 +1,62 @@
+# Home Assistant Automation: Intercom Mobile Notifications
+#
+# This automation listens for intercom calls targeting mobile devices
+# and sends actionable notifications with a tap-to-answer deep link.
+#
+# To use this automation:
+# 1. Copy this to your automations.yaml or create via HA UI
+# 2. Configure mobile devices in the Intercom Hub add-on options:
+#    mobile_devices:
+#      - name: "Brian's iPhone"
+#        notify_service: "mobile_app_brians_iphone"
+#      - name: "Sarah's Android"
+#        notify_service: "mobile_app_sarahs_pixel"
+# 3. Replace YOUR_HA_URL with your Home Assistant URL
+#
+# How it works:
+# - When someone intercoms a mobile device, the hub publishes to intercom/call
+# - This automation receives that message and sends a push notification
+# - Tapping the notification opens Web PTT in the HA app to talk back
+
+alias: "Intercom: Mobile Notifications"
+description: "Send push notifications when someone intercoms a mobile device"
+trigger:
+  - platform: mqtt
+    topic: intercom/call
+condition: []
+action:
+  - variables:
+      call_data: "{{ trigger.payload | from_json }}"
+      target_name: "{{ call_data.target }}"
+      caller_name: "{{ call_data.caller }}"
+      notify_service: "{{ call_data.notify_service }}"
+  - service: "notify.{{ notify_service }}"
+    data:
+      title: "Intercom Call"
+      message: "{{ caller_name }} is calling"
+      data:
+        # iOS-specific options
+        push:
+          sound:
+            name: default
+            critical: 1
+            volume: 1.0
+          interruption-level: time-sensitive
+        # Android-specific options
+        channel: intercom
+        importance: high
+        ttl: 0
+        priority: high
+        # Deep link to Web PTT (works on both iOS and Android)
+        # Replace YOUR_HA_URL with your actual Home Assistant URL
+        url: "/api/hassio/ingress/local_intercom_hub/"
+        clickAction: "/api/hassio/ingress/local_intercom_hub/"
+        # Action buttons
+        actions:
+          - action: URI
+            title: "Answer"
+            uri: "/api/hassio/ingress/local_intercom_hub/"
+          - action: DISMISS
+            title: "Dismiss"
+mode: parallel
+max: 10
