@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '⚠️  CONTEXT COMPACTION IMMINENT — Call record-keeper now with a full session summary before context is lost. Include: what was completed, decisions made, current state, and next steps.'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '📋 SESSION ENDING — If significant work was done this session and record-keeper has not been called, call it now before closing.'"
+          }
+        ]
+      }
+    ]
+  }
+}
