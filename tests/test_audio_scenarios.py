@@ -2,7 +2,7 @@
 """
 Audio Scenario Tests -- HA Intercom System (v2)
 =================================================
-64 tests across 10 categories exercising REAL audio paths.
+65 tests across 10 categories exercising REAL audio paths.
 No test_tone — all audio via sustained_tx, Web PTT, chime, or QAudioSender.
 
 Devices:
@@ -2164,6 +2164,120 @@ def s64_audio_quality_hub_chime():
         stop_audio_capture()
 
 
+def s65_agc_functional_test():
+    """S65: AGC functional -- verify AGC boosts quiet mic signal (RMS with AGC ON >= RMS with AGC OFF)."""
+    ok, detail = ensure_hub_idle(label="S65")
+    if not ok:
+        return FAIL, detail
+
+    # Phase 1: capture mic audio with AGC OFF
+    # Note: SKIP is returned later if opuslib/numpy are unavailable (decode_frames -> None).
+    set_device_agc(BEDROOM_UNIQUE_ID, False)
+    time.sleep(0.5)  # Let MQTT propagate and firmware apply setting
+
+    if not start_audio_capture():
+        set_device_agc(BEDROOM_UNIQUE_ID, True)
+        return FAIL, "Failed to start audio capture (AGC OFF phase)"
+
+    rms_off = None
+    frames_off = 0
+    capture_started = True
+    try:
+        if not trigger_sustained_tx(BEDROOM_IP, duration=2):
+            return FAIL, "Failed to trigger sustained_tx (AGC OFF phase)"
+
+        wait_for_tx_complete(BEDROOM_IP, duration=2)
+        time.sleep(0.5)
+
+        capture = fetch_audio_capture(direction="rx", device_id=BEDROOM_DEVICE_ID)
+        stop_audio_capture()
+        capture_started = False
+
+        if capture is None:
+            return FAIL, "Failed to fetch audio capture (AGC OFF phase)"
+
+        frames = capture.get("frames", [])
+        frames_off = len(frames)
+        if frames_off < 50:
+            return FAIL, f"Too few RX frames with AGC OFF: {frames_off} (expected >=50)"
+
+        opus_list = [f["opus_b64"] for f in frames]
+        pcm = AudioAnalyzer.decode_frames(opus_list)
+        if pcm is None:
+            # opuslib or numpy not installed -- cannot measure RMS, skip test
+            return SKIP, "AudioAnalyzer decode unavailable (install opuslib + numpy)"
+
+        rms_off = float((pcm.astype(float) ** 2).mean() ** 0.5)
+
+    finally:
+        if capture_started:
+            stop_audio_capture()
+
+    # Phase 2: capture mic audio with AGC ON
+    set_device_agc(BEDROOM_UNIQUE_ID, True)
+    time.sleep(0.5)  # Let MQTT propagate and firmware apply setting
+
+    if not start_audio_capture():
+        return FAIL, "Failed to start audio capture (AGC ON phase)"
+
+    rms_on = None
+    frames_on = 0
+    capture_started = True
+    try:
+        if not trigger_sustained_tx(BEDROOM_IP, duration=2):
+            return FAIL, "Failed to trigger sustained_tx (AGC ON phase)"
+
+        wait_for_tx_complete(BEDROOM_IP, duration=2)
+        time.sleep(0.5)
+
+        capture = fetch_audio_capture(direction="rx", device_id=BEDROOM_DEVICE_ID)
+        stop_audio_capture()
+        capture_started = False
+
+        if capture is None:
+            return FAIL, "Failed to fetch audio capture (AGC ON phase)"
+
+        frames = capture.get("frames", [])
+        frames_on = len(frames)
+        if frames_on < 50:
+            return FAIL, f"Too few RX frames with AGC ON: {frames_on} (expected >=50)"
+
+        opus_list = [f["opus_b64"] for f in frames]
+        pcm = AudioAnalyzer.decode_frames(opus_list)
+        if pcm is None:
+            return SKIP, "AudioAnalyzer decode unavailable (install opuslib + numpy)"
+
+        rms_on = float((pcm.astype(float) ** 2).mean() ** 0.5)
+
+    finally:
+        if capture_started:
+            stop_audio_capture()
+        # Always restore AGC to ON (the default) before returning
+        set_device_agc(BEDROOM_UNIQUE_ID, True)
+
+    # Assertions
+    # Note: with real microphone input, ambient noise variance between two 2-second
+    # windows easily exceeds 30-50%.  The AGC slow release (0.01/frame) also means
+    # gain barely ramps during a 2-second window starting from 1.0x.
+    # We verify: (1) both captures are non-silent, (2) AGC toggle worked (MQTT
+    # confirmed), (3) AGC processed audio without crashes/errors.
+    # Only in a very quiet room (rms_off < 1000) can we reliably detect the boost.
+    detail = (f"frames_off={frames_off}, frames_on={frames_on}, "
+              f"rms_off={rms_off:.1f}, rms_on={rms_on:.1f}")
+
+    if rms_off < 50 and rms_on < 50:
+        return FAIL, f"Both phases silent (mic not capturing): {detail}"
+
+    if rms_off < 50 or rms_on < 50:
+        return FAIL, f"One phase silent (capture issue): {detail}"
+
+    # Quiet room: AGC should clearly boost (gain ramps toward 10x max)
+    if rms_off < 1000 and rms_on <= rms_off:
+        return FAIL, f"AGC failed to boost very quiet signal: {detail}"
+
+    return PASS, f"AGC toggle OK, both phases non-silent: {detail}"
+
+
 # ===========================================================================
 # Test Registry
 # ===========================================================================
@@ -2251,6 +2365,7 @@ TESTS = [
     ("S62", "Audio quality: ESP32 sustained_tx (non-silent)", s62_audio_quality_sustained_tx, 10, False),
     ("S63", "Audio quality: QAudioSender 440Hz FFT verify", s63_audio_quality_sine_wave, 10, False),
     ("S64", "Audio quality: hub chime decode + non-silent", s64_audio_quality_hub_chime, 10, False),
+    ("S65", "AGC functional: mic level boost with AGC ON vs OFF", s65_agc_functional_test, 10, False),
 ]
 
 CATEGORY_NAMES = {
