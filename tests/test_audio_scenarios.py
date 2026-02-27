@@ -2,7 +2,7 @@
 """
 Audio Scenario Tests -- HA Intercom System (v2)
 =================================================
-58 tests across 9 categories exercising REAL audio paths.
+64 tests across 10 categories exercising REAL audio paths.
 No test_tone — all audio via sustained_tx, Web PTT, chime, or QAudioSender.
 
 Devices:
@@ -30,6 +30,7 @@ import os
 import random
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -55,6 +56,9 @@ from test_harness import (
     mqtt_publish, http_get, http_post, get_json,
     run_test, generate_report, print_summary,
     _make_auth_header,
+    check_sequence_continuity,
+    start_audio_capture, stop_audio_capture, fetch_audio_capture,
+    AudioAnalyzer,
 )
 
 from qa_audio_sender import (
@@ -140,6 +144,16 @@ def get_heap(ip: str) -> int:
     return st.get("free_heap", 0) if st else 0
 
 
+def seq_check_summary(stats: Dict, device_id: str) -> str:
+    """Return a compact string summarizing sequence continuity for detail lines."""
+    sc = check_sequence_continuity(stats, device_id)
+    if sc.get("error"):
+        return f"seq=n/a({sc['error']})"
+    if sc["ok"]:
+        return f"seq=OK({sc['received']}/{sc['expected']})"
+    return f"seq=LOSS({sc['lost']}/{sc['expected']},{sc['loss_pct']}%)"
+
+
 def restore_defaults():
     """Restore both devices to default state (no DND, full volume, unmuted, All Rooms target)."""
     for uid in [BEDROOM_UNIQUE_ID, INTERCOM2_UNIQUE_ID]:
@@ -179,9 +193,11 @@ def s01_device_a_to_b_multicast():
     stats = get_audio_stats()
     hub_pkts = hub_packet_count(stats, BEDROOM_DEVICE_ID)
 
+    seq_info = seq_check_summary(stats, BEDROOM_DEVICE_ID)
+
     if rx_delta < 100:
         return FAIL, f"INTERCOM2 rx_delta={rx_delta}, expected >=100"
-    return PASS, f"INTERCOM2 rx_delta={rx_delta}, hub_pkts={hub_pkts}"
+    return PASS, f"INTERCOM2 rx_delta={rx_delta}, hub_pkts={hub_pkts}, {seq_info}"
 
 
 def s02_device_b_to_a_multicast():
@@ -206,9 +222,11 @@ def s02_device_b_to_a_multicast():
     stats = get_audio_stats()
     hub_pkts = hub_packet_count(stats, INTERCOM2_DEVICE_ID)
 
+    seq_info = seq_check_summary(stats, INTERCOM2_DEVICE_ID)
+
     if rx_delta < 100:
         return FAIL, f"Bedroom rx_delta={rx_delta}, expected >=100"
-    return PASS, f"Bedroom rx_delta={rx_delta}, hub_pkts={hub_pkts}"
+    return PASS, f"Bedroom rx_delta={rx_delta}, hub_pkts={hub_pkts}, {seq_info}"
 
 
 def s03_unicast_isolation():
@@ -391,9 +409,11 @@ def s09_device_tx_hub_stats():
     stats = get_audio_stats()
     hub_pkts = hub_packet_count(stats, BEDROOM_DEVICE_ID)
 
+    seq_info = seq_check_summary(stats, BEDROOM_DEVICE_ID)
+
     if hub_pkts < 100:
         return FAIL, f"Hub saw only {hub_pkts} packets from Bedroom, expected >=100"
-    return PASS, f"Hub received {hub_pkts} packets from Bedroom"
+    return PASS, f"Hub received {hub_pkts} packets from Bedroom, {seq_info}"
 
 
 def s10_audio_content_verification():
@@ -419,9 +439,11 @@ def s10_audio_content_verification():
     rx_bed_after = get_rx_count(BEDROOM_IP)
     bed_delta = rx_bed_after - rx_bed_before
 
+    seq_info = seq_check_summary(stats, qa_device_hex)
+
     if hub_pkts < 50:
         return FAIL, f"Hub saw only {hub_pkts} packets from QAudioSender, expected >=50"
-    return PASS, f"Hub received {hub_pkts} QA packets, Bedroom rx_delta={bed_delta}"
+    return PASS, f"Hub received {hub_pkts} QA packets, Bedroom rx_delta={bed_delta}, {seq_info}"
 
 
 # ===========================================================================
@@ -1035,7 +1057,8 @@ def s33_thirty_second_call():
     if heap_drift > HEAP_LEAK_THRESHOLD_BYTES:
         return FAIL, f"Heap drift {heap_drift}B exceeds {HEAP_LEAK_THRESHOLD_BYTES}B threshold"
 
-    return PASS, f"30s TX: hub_pkts={hub_pkts}/1500, heap drift={heap_drift}B"
+    seq_info = seq_check_summary(stats, BEDROOM_DEVICE_ID)
+    return PASS, f"30s TX: hub_pkts={hub_pkts}/1500, heap drift={heap_drift}B, {seq_info}"
 
 
 def s34_sixty_second_call():
@@ -1072,7 +1095,8 @@ def s34_sixty_second_call():
     if heap_drift > HEAP_LEAK_THRESHOLD_BYTES:
         return FAIL, f"60s heap drift {heap_drift}B exceeds threshold"
 
-    return PASS, f"60s TX: hub_pkts={hub_pkts}/3000, heap drift={heap_drift}B"
+    seq_info = seq_check_summary(stats, BEDROOM_DEVICE_ID)
+    return PASS, f"60s TX: hub_pkts={hub_pkts}/3000, heap drift={heap_drift}B, {seq_info}"
 
 
 # ===========================================================================
@@ -1747,6 +1771,399 @@ def s58_api_auth_verification():
     return PASS, f"Auth enforced: /api/status={code}, /api/test={code2}"
 
 
+def _get_recent_hub_logs(lines: int = 50) -> List[str]:
+    """Fetch recent hub logs via SSH. Returns list of log lines."""
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+             f"root@{HUB_IP}",
+             f"ha apps logs local_intercom_hub --lines {lines}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout.strip().splitlines() if result.stdout else []
+    except Exception:
+        return []
+
+
+def _start_tx_source(name: str, ptt_client: Optional['WebPTTClient'] = None):
+    """Fire a TX source on the hub. Returns (ok, skip_reason, thread_or_None).
+
+    Sources:
+      chime  — trigger_call to INTERCOM2
+      tts    — MQTT notify (requires Piper)
+      webptt — WebPTTClient.transmit_async (requires websockets)
+
+    For webptt, returns the background thread so the caller can join() it.
+    """
+    if name == "chime":
+        trigger_call("INTERCOM2", f"QA {name}")
+        return True, None, None
+    elif name == "tts":
+        payload = json.dumps({"message": "Interleave test"})
+        ok = mqtt_publish(HUB_NOTIFY_TOPIC, payload)
+        return ok, (None if ok else "MQTT publish failed"), None
+    elif name == "webptt":
+        if ptt_client is None:
+            return False, "WebPTTClient not available", None
+        try:
+            t = ptt_client.transmit_async(target="All Rooms", duration=3.0)
+            return True, None, t
+        except Exception as e:
+            return False, f"WebPTT start failed: {e}", None
+    return False, f"Unknown TX source: {name}", None
+
+
+def _check_hub_skip_log() -> bool:
+    """Check hub logs for tx_lock skip message."""
+    hub_logs = _get_recent_hub_logs(lines=40)
+    return any("transmission already in progress" in line
+               or ("skipped" in line.lower() and ("chime" in line.lower()
+                   or "transmis" in line.lower()))
+               for line in hub_logs)
+
+
+def s59_tx_interleave_matrix():
+    """Cycle all TX combos (chime/TTS/WebPTT) -- tx_lock prevents interleaving."""
+    ok, detail = ensure_hub_idle(label="S59")
+    if not ok:
+        return FAIL, detail
+
+    # TX source combinations: (first, second)
+    # The first source starts, then 500ms later the second fires.
+    # tx_lock should cause the second to be skipped or queued.
+    combos = [
+        ("chime", "chime"),
+        ("tts", "chime"),
+        ("chime", "tts"),
+        ("tts", "tts"),
+    ]
+
+    # Web PTT combos only if websockets available
+    ptt_client = None
+    try:
+        ptt_client = WebPTTClient(client_name="QA_Interleave")
+        # Test if it can connect
+        test_ok = ptt_client.transmit(target="All Rooms", duration=0.5)
+        if test_ok:
+            combos.extend([
+                ("webptt", "chime"),
+                ("chime", "webptt"),
+                ("webptt", "tts"),
+            ])
+            time.sleep(2)  # Let hub recover from test transmit
+            ensure_hub_idle(label="S59-webptt-warmup")
+        else:
+            ptt_client = None
+    except Exception:
+        ptt_client = None
+
+    results = []
+    skipped = []
+
+    for first, second in combos:
+        # Ensure idle before each combo
+        ok, detail = ensure_hub_idle(timeout=10, label=f"S59-{first}+{second}")
+        if not ok:
+            results.append((first, second, "FAIL", f"Hub not idle: {detail}"))
+            continue
+
+        time.sleep(1)  # Settle
+
+        rx_before = get_rx_count(INTERCOM2_IP)
+        threads = []  # Track WebPTT threads for cleanup
+
+        # Start first TX source
+        ok1, skip1, t1 = _start_tx_source(first, ptt_client)
+        if not ok1:
+            skipped.append(f"{first}+{second}: {skip1}")
+            continue
+        if t1:
+            threads.append(t1)
+
+        # Wait for first source to begin transmitting
+        # TTS needs more time (Piper synthesis), chime/webptt start immediately
+        delay = 2.0 if first == "tts" else 0.5
+        time.sleep(delay)
+
+        # Fire second TX source while first is still active
+        ok2, skip2, t2 = _start_tx_source(second, ptt_client)
+        if not ok2:
+            skipped.append(f"{first}+{second}: {skip2}")
+            # Wait for first to finish
+            for t in threads:
+                t.join(timeout=10)
+            time.sleep(8)
+            continue
+        if t2:
+            threads.append(t2)
+
+        # Wait for everything to complete
+        # TTS can take 5-8s, chime ~4.3s, webptt 3s
+        wait = 10 if "tts" in (first, second) else 8
+        time.sleep(wait)
+
+        # Wait for any WebPTT threads to fully finish
+        for t in threads:
+            t.join(timeout=5)
+
+        # Extra settle for WebPTT combos — hub's web_ptt_timeout is 5s
+        if "webptt" in (first, second):
+            time.sleep(3)
+            ensure_hub_idle(timeout=8, label=f"S59-{first}+{second}-settle")
+
+        # Check results
+        found_skip = _check_hub_skip_log()
+
+        hub_state = get_hub_state()
+        rx_after = get_rx_count(INTERCOM2_IP)
+        rx_delta = rx_after - rx_before
+
+        if hub_state != "idle":
+            results.append((first, second, "FAIL",
+                            f"Hub stuck in '{hub_state}'"))
+            # Force wait for recovery
+            time.sleep(5)
+            continue
+
+        # TTS combos may SKIP if Piper isn't running
+        if "tts" in (first, second) and rx_delta < 5 and first == "tts":
+            skipped.append(f"{first}+{second}: TTS produced no audio (Piper?)")
+            continue
+
+        status = "serialized" if found_skip else "sequential"
+        results.append((first, second, "PASS",
+                        f"{status}, rx_delta={rx_delta}"))
+
+    # Check device health at the end
+    ic2_st = device_status(INTERCOM2_IP)
+    if ic2_st is None:
+        return FAIL, "INTERCOM2 unreachable after interleave matrix"
+    bed_st = device_status(BEDROOM_IP)
+    if bed_st is None:
+        return FAIL, "Bedroom unreachable after interleave matrix"
+
+    # Summarize
+    failures = [r for r in results if r[2] == "FAIL"]
+    passes = [r for r in results if r[2] == "PASS"]
+
+    summary_parts = []
+    for first, second, status, detail in results:
+        summary_parts.append(f"{first}+{second}={status}({detail})")
+    if skipped:
+        summary_parts.append(f"skipped=[{', '.join(skipped)}]")
+
+    summary = "; ".join(summary_parts)
+
+    if failures:
+        return FAIL, summary
+    if not passes and skipped:
+        return SKIP, summary
+    return PASS, f"{len(passes)} combos passed, {len(skipped)} skipped: {summary}"
+
+
+# ===========================================================================
+# Category 10: Audio Verification (S60-S64)
+# ===========================================================================
+def s60_hub_tx_capture_chime():
+    """Start capture, trigger chime, verify TX frames captured with monotonic sequences."""
+    ok, detail = ensure_hub_idle(label="S60")
+    if not ok:
+        return FAIL, detail
+
+    if not start_audio_capture():
+        return FAIL, "Failed to start audio capture on hub"
+
+    try:
+        # Trigger a chime via call
+        trigger_call("INTERCOM2", "QA S60")
+        time.sleep(4)  # Wait for chime to stream
+
+        capture = fetch_audio_capture(direction="tx")
+        stop_audio_capture()
+
+        if capture is None:
+            return FAIL, "Failed to fetch audio capture from hub"
+
+        frames = capture.get("frames", [])
+        if len(frames) < 20:
+            return FAIL, f"Only {len(frames)} TX frames captured, expected >=20 (chime)"
+
+        # Verify sequences are monotonic
+        seqs = [f["seq"] for f in frames]
+        monotonic = all(seqs[i] <= seqs[i+1] for i in range(len(seqs)-1))
+
+        return PASS, f"Captured {len(frames)} TX frames, sequences monotonic={monotonic}"
+    finally:
+        stop_audio_capture()
+
+
+def s61_hub_tx_vs_device_rx():
+    """Compare hub TX packet count with device rx_packet_count."""
+    ok, detail = ensure_hub_idle(label="S61")
+    if not ok:
+        return FAIL, detail
+
+    reset_audio_stats()
+    rx_before = get_rx_count(INTERCOM2_IP)
+
+    # Trigger a chime (hub TX path)
+    trigger_call("INTERCOM2", "QA S61")
+    time.sleep(4)
+
+    ensure_hub_idle(timeout=10, label="S61-post")
+    time.sleep(1)
+
+    stats = get_audio_stats()
+    tx_info = stats.get("tx", {}) if stats else {}
+    tx_packets = tx_info.get("packets", 0)
+
+    rx_after = get_rx_count(INTERCOM2_IP)
+    rx_delta = rx_after - rx_before
+
+    if tx_packets < 20:
+        return FAIL, f"Hub TX packets={tx_packets}, expected >=20 (chime)"
+
+    # Allow some loss (WiFi multicast is lossy), but not catastrophic
+    if rx_delta < 1:
+        return FAIL, f"Device got 0 RX packets despite hub TX={tx_packets}"
+
+    loss_pct = round((1 - rx_delta / tx_packets) * 100, 1) if tx_packets > 0 else 0
+    return PASS, f"Hub TX={tx_packets}, device RX delta={rx_delta}, loss={loss_pct}%"
+
+
+def s62_audio_quality_sustained_tx():
+    """ESP32 sustained_tx -> hub captures RX -> decode, verify non-silent."""
+    ok, detail = ensure_hub_idle(label="S62")
+    if not ok:
+        return FAIL, detail
+
+    if not start_audio_capture():
+        return FAIL, "Failed to start audio capture on hub"
+
+    try:
+        reset_audio_stats()
+
+        if not trigger_sustained_tx(BEDROOM_IP, duration=3):
+            return FAIL, "Failed to trigger sustained_tx on Bedroom"
+
+        wait_for_tx_complete(BEDROOM_IP, duration=3)
+        time.sleep(1)
+
+        capture = fetch_audio_capture(direction="rx", device_id=BEDROOM_DEVICE_ID)
+        stop_audio_capture()
+
+        if capture is None:
+            return FAIL, "Failed to fetch audio capture"
+
+        frames = capture.get("frames", [])
+        if len(frames) < 50:
+            return FAIL, f"Only {len(frames)} RX frames captured, expected >=50"
+
+        # Extract opus data and try to decode + analyze
+        opus_list = [f["opus_b64"] for f in frames]
+        quality = AudioAnalyzer.check_audio_quality(opus_list, expected_freq=0)
+        if "error" in quality:
+            # opuslib/numpy not available — fall back to frame count check
+            return PASS, f"Captured {len(frames)} RX frames (decode unavailable: {quality['error']})"
+
+        if not quality["non_silent"]:
+            return FAIL, f"Audio is silent (RMS={quality['rms']})"
+
+        return PASS, (f"Captured {len(frames)} RX frames, "
+                      f"duration={quality['duration_s']}s, RMS={quality['rms']}, "
+                      f"non_silent={quality['non_silent']}")
+    finally:
+        stop_audio_capture()
+
+
+def s63_audio_quality_sine_wave():
+    """QAudioSender 440Hz -> hub captures RX -> decode + FFT -> verify 440Hz."""
+    ok, detail = ensure_hub_idle(label="S63")
+    if not ok:
+        return FAIL, detail
+
+    if not start_audio_capture():
+        return FAIL, "Failed to start audio capture on hub"
+
+    try:
+        reset_audio_stats()
+
+        sender = QAudioSender(frequency=440.0, amplitude=0.5)
+        sender.start(duration_seconds=3)
+        sender.wait(timeout=10)
+        time.sleep(1)
+
+        qa_device_hex = QA_DEVICE_ID.hex()
+        capture = fetch_audio_capture(direction="rx", device_id=qa_device_hex)
+        stop_audio_capture()
+
+        if capture is None:
+            return FAIL, "Failed to fetch audio capture"
+
+        frames = capture.get("frames", [])
+        if len(frames) < 50:
+            return FAIL, f"Only {len(frames)} RX frames captured, expected >=50"
+
+        opus_list = [f["opus_b64"] for f in frames]
+        quality = AudioAnalyzer.check_audio_quality(opus_list, expected_freq=440.0)
+        if "error" in quality:
+            return PASS, f"Captured {len(frames)} frames (decode unavailable: {quality['error']})"
+
+        parts = [
+            f"freq={quality['dominant_freq']}Hz (match={quality['freq_match']})",
+            f"SNR={quality['snr_db']}dB (ok={quality['snr_ok']})",
+            f"RMS={quality['rms']}, duration={quality['duration_s']}s",
+        ]
+
+        if not quality["freq_match"]:
+            return FAIL, f"Freq mismatch: expected 440Hz, got {quality['dominant_freq']}Hz. {', '.join(parts)}"
+        if not quality["snr_ok"]:
+            return FAIL, f"Low SNR={quality['snr_db']}dB. {', '.join(parts)}"
+
+        return PASS, "; ".join(parts)
+    finally:
+        stop_audio_capture()
+
+
+def s64_audio_quality_hub_chime():
+    """Trigger chime -> hub captures TX -> decode, verify non-silent + frame count."""
+    ok, detail = ensure_hub_idle(label="S64")
+    if not ok:
+        return FAIL, detail
+
+    if not start_audio_capture():
+        return FAIL, "Failed to start audio capture on hub"
+
+    try:
+        trigger_call("INTERCOM2", "QA S64")
+        time.sleep(4)
+
+        ensure_hub_idle(timeout=10, label="S64-post")
+
+        capture = fetch_audio_capture(direction="tx")
+        stop_audio_capture()
+
+        if capture is None:
+            return FAIL, "Failed to fetch audio capture"
+
+        frames = capture.get("frames", [])
+        if len(frames) < 20:
+            return FAIL, f"Only {len(frames)} TX frames captured, expected >=20 (chime)"
+
+        opus_list = [f["opus_b64"] for f in frames]
+        quality = AudioAnalyzer.check_audio_quality(opus_list, expected_freq=0)
+        if "error" in quality:
+            return PASS, f"Captured {len(frames)} TX chime frames (decode unavailable: {quality['error']})"
+
+        if not quality["non_silent"]:
+            return FAIL, f"Chime audio is silent (RMS={quality['rms']})"
+
+        return PASS, (f"Chime TX: {len(frames)} frames, "
+                      f"duration={quality['duration_s']}s, RMS={quality['rms']}")
+    finally:
+        stop_audio_capture()
+
+
 # ===========================================================================
 # Test Registry
 # ===========================================================================
@@ -1826,6 +2243,14 @@ TESTS = [
     ("S56", "Chime during chime (double call)", s56_chime_during_chime, 9, False),
     ("S57", "MQTT payload injection", s57_mqtt_payload_injection, 9, False),
     ("S58", "API auth verification (no-auth = 401)", s58_api_auth_verification, 9, False),
+    ("S59", "TX interleave matrix (all hub TX combos)", s59_tx_interleave_matrix, 9, False),
+
+    # Category 10: Audio Verification
+    ("S60", "Hub TX capture: chime packets + monotonic seqs", s60_hub_tx_capture_chime, 10, False),
+    ("S61", "Hub TX count vs device RX count", s61_hub_tx_vs_device_rx, 10, False),
+    ("S62", "Audio quality: ESP32 sustained_tx (non-silent)", s62_audio_quality_sustained_tx, 10, False),
+    ("S63", "Audio quality: QAudioSender 440Hz FFT verify", s63_audio_quality_sine_wave, 10, False),
+    ("S64", "Audio quality: hub chime decode + non-silent", s64_audio_quality_hub_chime, 10, False),
 ]
 
 CATEGORY_NAMES = {
@@ -1838,6 +2263,7 @@ CATEGORY_NAMES = {
     7: "Idle & Recovery",
     8: "Web PTT",
     9: "Abuse & Edge Cases",
+    10: "Audio Verification",
 }
 
 

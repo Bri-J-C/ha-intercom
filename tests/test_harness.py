@@ -43,8 +43,8 @@ HUB_PORT = 8099
 
 MQTT_HOST = "10.0.0.8"
 MQTT_PORT = 1883
-MQTT_USER = "REDACTED_MQTT_USER"
-MQTT_PASS = "REDACTED_MQTT_PASS"
+MQTT_USER = os.environ.get("MQTT_USER", "")
+MQTT_PASS = os.environ.get("MQTT_PASS", "")
 
 BEDROOM_UNIQUE_ID = "intercom_XXXXXXXX"
 INTERCOM2_UNIQUE_ID = "intercom_YYYYYYYY"
@@ -58,8 +58,8 @@ HUB_NOTIFY_TOPIC = f"intercom/{HUB_UNIQUE_ID}/notify"
 
 DEVICE_TIMEOUT = 10
 HUB_TIMEOUT = 5
-DEVICE_USER = "admin"
-DEVICE_PASS = "admin"
+DEVICE_USER = os.environ.get("DEVICE_USER", "admin")
+DEVICE_PASS = os.environ.get("DEVICE_PASS", "")
 
 PACKETS_PER_SECOND = 50
 HEAP_LEAK_THRESHOLD_BYTES = 8192
@@ -112,6 +112,20 @@ _websockets_available = False
 try:
     import websockets
     _websockets_available = True
+except ImportError:
+    pass
+
+_numpy_available = False
+try:
+    import numpy as np
+    _numpy_available = True
+except ImportError:
+    pass
+
+_opuslib_available = False
+try:
+    import opuslib
+    _opuslib_available = True
 except ImportError:
     pass
 
@@ -216,6 +230,183 @@ def hub_packet_count(stats: Optional[Dict], device_id: str) -> int:
     senders = stats.get("senders", {})
     entry = senders.get(device_id, {})
     return entry.get("packet_count", 0)
+
+
+def check_sequence_continuity(stats: Optional[Dict], device_id: str) -> Dict:
+    """Check sequence continuity for a sender in hub audio_stats.
+
+    Uses seq_min, seq_max, packet_count already returned by /api/audio_stats.
+    Returns a dict with analysis results.
+    """
+    if not stats:
+        return {"ok": False, "error": "no stats"}
+    senders = stats.get("senders", {})
+    sender = senders.get(device_id)
+    if not sender:
+        return {"ok": False, "error": f"sender {device_id} not found"}
+    seq_min = sender.get("seq_min", 0)
+    seq_max = sender.get("seq_max", 0)
+    pkt_count = sender.get("packet_count", 0)
+    expected = seq_max - seq_min + 1
+    if expected <= 0:
+        return {"ok": True, "expected": 0, "received": pkt_count, "lost": 0, "loss_pct": 0.0}
+    lost = expected - pkt_count
+    loss_pct = round(lost / expected * 100, 1) if expected > 0 else 0.0
+    return {
+        "ok": lost <= 0,
+        "expected": expected,
+        "received": pkt_count,
+        "lost": max(0, lost),
+        "loss_pct": max(0.0, loss_pct),
+        "seq_min": seq_min,
+        "seq_max": seq_max,
+    }
+
+
+def start_audio_capture() -> bool:
+    """Enable hub audio capture buffer."""
+    code, _ = http_post(hub_url("/api/audio_capture"), {"action": "start"}, timeout=HUB_TIMEOUT)
+    return code == 200
+
+
+def stop_audio_capture() -> bool:
+    """Disable hub audio capture buffer."""
+    code, _ = http_post(hub_url("/api/audio_capture"), {"action": "stop"}, timeout=HUB_TIMEOUT)
+    return code == 200
+
+
+def fetch_audio_capture(direction: Optional[str] = None,
+                        device_id: Optional[str] = None,
+                        since: Optional[float] = None,
+                        limit: int = 500) -> Optional[Dict]:
+    """Fetch captured audio frames from hub."""
+    params = []
+    if direction:
+        params.append(f"direction={direction}")
+    if device_id:
+        params.append(f"device_id={device_id}")
+    if since is not None:
+        params.append(f"since={since}")
+    if limit != 500:
+        params.append(f"limit={limit}")
+    qs = "&".join(params)
+    url = hub_url(f"/api/audio_capture{'?' + qs if qs else ''}")
+    return get_json(url, timeout=HUB_TIMEOUT)
+
+
+class AudioAnalyzer:
+    """Decode and analyze Opus audio frames captured by the hub.
+
+    Requires: opuslib, numpy
+    """
+
+    @staticmethod
+    def decode_frames(opus_b64_list, sample_rate=16000):
+        """Decode list of base64-encoded Opus frames to numpy PCM array.
+
+        Returns numpy int16 array, or None if dependencies unavailable.
+        """
+        if not _opuslib_available or not _numpy_available:
+            return None
+        if not opus_b64_list:
+            return None
+
+        decoder = opuslib.Decoder(sample_rate, 1)
+        pcm_chunks = []
+        for b64 in opus_b64_list:
+            try:
+                opus_data = base64.b64decode(b64)
+                pcm = decoder.decode(opus_data, 320)  # 20ms at 16kHz = 320 samples
+                pcm_chunks.append(np.frombuffer(pcm, dtype=np.int16))
+            except Exception:
+                # Insert silence for corrupt frames
+                pcm_chunks.append(np.zeros(320, dtype=np.int16))
+        if not pcm_chunks:
+            return None
+        return np.concatenate(pcm_chunks)
+
+    @staticmethod
+    def dominant_frequency(pcm, sample_rate=16000):
+        """Find dominant frequency via FFT. Returns Hz or 0.0 on failure."""
+        if not _numpy_available or pcm is None or len(pcm) < 320:
+            return 0.0
+        # Use float for FFT
+        signal = pcm.astype(np.float64)
+        # Window to reduce spectral leakage
+        window = np.hanning(len(signal))
+        windowed = signal * window
+        fft = np.fft.rfft(windowed)
+        magnitudes = np.abs(fft)
+        # Ignore DC component
+        magnitudes[0] = 0
+        if len(magnitudes) < 2:
+            return 0.0
+        peak_idx = np.argmax(magnitudes)
+        freq = peak_idx * sample_rate / len(signal)
+        return float(freq)
+
+    @staticmethod
+    def snr(pcm, expected_freq, sample_rate=16000):
+        """Estimate SNR in dB relative to expected frequency."""
+        if not _numpy_available or pcm is None or len(pcm) < 320:
+            return 0.0
+        signal = pcm.astype(np.float64)
+        window = np.hanning(len(signal))
+        windowed = signal * window
+        fft = np.fft.rfft(windowed)
+        magnitudes = np.abs(fft)
+        freq_resolution = sample_rate / len(signal)
+
+        # Find signal bin (expected_freq +/- 2 bins)
+        signal_bin = int(round(expected_freq / freq_resolution))
+        signal_power = 0.0
+        noise_power = 0.0
+        for i in range(1, len(magnitudes)):  # skip DC
+            power = magnitudes[i] ** 2
+            if abs(i - signal_bin) <= 2:
+                signal_power += power
+            else:
+                noise_power += power
+
+        if noise_power < 1e-10:
+            return 60.0  # Essentially perfect
+        return 10 * np.log10(signal_power / noise_power) if signal_power > 0 else 0.0
+
+    @staticmethod
+    def check_audio_quality(opus_b64_list, expected_freq=440.0, sample_rate=16000):
+        """Full audio quality report from captured Opus frames.
+
+        Returns dict with:
+            dominant_freq, freq_match (within 5%), snr_db, snr_ok (>15dB),
+            clipping (any sample at +/-32767), duration_s, frame_count,
+            non_silent (RMS > 100)
+        """
+        pcm = AudioAnalyzer.decode_frames(opus_b64_list, sample_rate)
+        if pcm is None:
+            return {"error": "decode failed or missing dependencies"}
+
+        dom_freq = AudioAnalyzer.dominant_frequency(pcm, sample_rate)
+        snr_db = AudioAnalyzer.snr(pcm, expected_freq, sample_rate) if expected_freq > 0 else 0.0
+
+        rms = float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
+        clipping = bool(np.any(np.abs(pcm) >= 32767))
+        duration = len(pcm) / sample_rate
+
+        freq_tolerance = 0.05  # 5%
+        freq_match = (abs(dom_freq - expected_freq) / expected_freq < freq_tolerance
+                      if expected_freq > 0 else True)
+
+        return {
+            "dominant_freq": round(dom_freq, 1),
+            "freq_match": freq_match,
+            "snr_db": round(snr_db, 1),
+            "snr_ok": snr_db > 15.0,
+            "clipping": clipping,
+            "duration_s": round(duration, 2),
+            "frame_count": len(opus_b64_list),
+            "non_silent": rms > 100,
+            "rms": round(rms, 1),
+        }
 
 
 def post_test_action(ip: str, action: str, extra: Optional[Dict] = None,
