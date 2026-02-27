@@ -79,7 +79,7 @@ static StaticTask_t play_task_tcb;
 // Audio playback state
 static volatile uint32_t last_audio_rx_time = 0;
 volatile bool audio_playing = false;  // non-static: accessed by webserver.c via extern
-static uint32_t rx_packet_count = 0;
+uint32_t rx_packet_count = 0;  // non-static: exposed to webserver.c via extern
 
 // QA observability counters (logging only — no functional effect)
 // Single-word counters: atomic on ESP32-S3 Xtensa, used for logging only
@@ -88,6 +88,12 @@ static uint32_t tx_log_counter = 0;       // Downsample TX packet logs (every 50
 static uint32_t rx_drop_total = 0;        // Accumulated RX queue drop count
 static uint32_t tx_frame_count = 0;       // Total frames sent in current PTT session
 static uint32_t tx_start_tick = 0;        // Tick when PTT started (for duration calc)
+
+// Cumulative counters since boot (non-static: exposed to webserver.c via extern)
+uint32_t tx_frame_total = 0;              // Total Opus frames sent since boot (never resets)
+
+// Sustained TX state (non-static: accessed by webserver.c via extern)
+volatile bool sustained_tx_active = false; // True while API-initiated sustained_tx is running
 
 // Sequence tracking for PLC/FEC
 static volatile uint32_t last_sequence = 0;
@@ -98,6 +104,15 @@ static uint8_t current_sender[DEVICE_ID_LENGTH] = {0};
 static volatile bool has_current_sender = false;
 static volatile uint8_t current_rx_priority = 0;  // Priority of current sender (PRIORITY_NORMAL = 0)
 #define SENDER_TIMEOUT_MS 500  // Release channel after 500ms silence
+
+/**
+ * Get current RX audio queue depth (items waiting to be decoded/played).
+ * Returns 0 if queue not yet created.
+ */
+UBaseType_t get_rx_queue_depth(void)
+{
+    return rx_audio_queue ? uxQueueMessagesWaiting(rx_audio_queue) : 0;
+}
 
 // Display room list tracking
 static int last_device_count = -1;
@@ -173,6 +188,7 @@ static void on_audio_received(const audio_packet_t *packet, size_t total_len)
     // DND check: discard NORMAL and HIGH, let EMERGENCY through
     const settings_t *cfg = settings_get();
     if (cfg->dnd_enabled && incoming_priority < 2) {
+        ESP_LOGD(TAG, "DND active, ignoring audio (priority=%d)", incoming_priority);
         return;
     }
 
@@ -548,6 +564,7 @@ static void audio_tx_task(void *arg)
             network_send_multicast(packet, HEADER_LENGTH + opus_len);
         }
         tx_frame_count++;
+        tx_frame_total++;
 
         // Log every 50th TX packet (~1/sec during audio)
         tx_log_counter++;
@@ -557,6 +574,11 @@ static void audio_tx_task(void *arg)
                      (unsigned)opus_len,
                      target_ip ? target_ip : "multicast");
         }
+
+        // Delay 1 tick (1ms at 1000Hz) to let IDLE task feed the watchdog.
+        // taskYIELD() was insufficient — it only yields to same-priority tasks,
+        // not the lower-priority IDLE task that resets the WDT.
+        vTaskDelay(1);
     }
 
     ESP_LOGI(TAG, "Audio TX task stopped");
@@ -576,6 +598,39 @@ static led_state_t get_idle_led_state(void)
 }
 
 /**
+ * Sustained TX stop task — sleeps for the requested duration, then stops TX.
+ *
+ * Spawned by the /api/test sustained_tx action. The arg is a heap-allocated
+ * uint32_t holding the duration in milliseconds. This task frees the arg
+ * before deleting itself.
+ *
+ * If PTT button is pressed/released during the sustained TX, the button
+ * handler clears sustained_tx_active and transmitting. This task detects
+ * that on wakeup and exits without double-clearing.
+ */
+void sustained_tx_stop_task(void *arg)
+{
+    uint32_t duration_ms = *(uint32_t *)arg;
+    free(arg);
+
+    vTaskDelay(pdMS_TO_TICKS(duration_ms));
+
+    if (sustained_tx_active) {
+        ESP_LOGI(TAG, "[sustained_tx] duration elapsed (%lums), stopping TX",
+                 (unsigned long)duration_ms);
+        transmitting = false;
+        sustained_tx_active = false;
+        button_set_led_state(get_idle_led_state());
+        display_set_state(DISPLAY_STATE_IDLE);
+        ha_mqtt_set_state(HA_STATE_IDLE);
+    } else {
+        ESP_LOGI(TAG, "[sustained_tx] already stopped (PTT override or external stop)");
+    }
+
+    vTaskDelete(NULL);
+}
+
+/**
  * Generate a short fallback beep (800 Hz, ~500ms) for call notification.
  *
  * The hub streams the real chime over UDP/Opus. This beep is played
@@ -592,6 +647,8 @@ void play_fallback_beep(void)
         ESP_LOGW(TAG, "Beep: skipped — currently transmitting");
         return;
     }
+
+    ESP_LOGI(TAG, "Beep: muted=%d, playing beep (caller force-unmutes)", audio_output_is_muted());
 
     uint32_t beep_start = xTaskGetTickCount();
 
@@ -663,6 +720,12 @@ static void play_incoming_call_chime(void)
 {
     if (transmitting) {
         ESP_LOGW(TAG, "Call chime: skipped — currently transmitting");
+        return;
+    }
+
+    const settings_t *cfg = settings_get();
+    if (cfg->dnd_enabled) {
+        ESP_LOGI(TAG, "Call chime: skipped — DND active");
         return;
     }
 
@@ -927,6 +990,7 @@ static void on_button_event(button_event_t event, bool is_broadcast)
             button_set_led_state(get_idle_led_state());  // White, red, or purple if DND
             display_set_state(DISPLAY_STATE_IDLE);
             transmitting = false;
+            sustained_tx_active = false;  // Cancel any API-initiated sustained_tx
             ha_mqtt_set_state(HA_STATE_IDLE);
             break;
         }

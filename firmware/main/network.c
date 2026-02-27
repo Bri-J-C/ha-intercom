@@ -41,6 +41,10 @@ static bool rx_running = false;
 static TimerHandle_t mdns_reannounce_timer = NULL;
 #define MDNS_REANNOUNCE_INTERVAL_MS 60000
 
+// IGMP multicast rejoin timer — refreshes group membership periodically
+static TimerHandle_t igmp_rejoin_timer = NULL;
+#define IGMP_REJOIN_INTERVAL_MS 60000
+
 // TX packet statistics
 static uint32_t tx_packets_sent = 0;
 static uint32_t tx_packets_failed = 0;
@@ -48,6 +52,12 @@ static int tx_last_errno = 0;
 
 // Forward declaration
 static void start_ap_mode(void);
+
+// IGMP rejoin timer callback
+static void igmp_rejoin_timer_cb(TimerHandle_t timer)
+{
+    network_rejoin_multicast();
+}
 
 // Periodic mDNS re-announcement (safety net for missed events)
 static void mdns_reannounce_timer_cb(TimerHandle_t timer)
@@ -110,6 +120,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             mdns_netif_action(sta_netif, MDNS_EVENT_ENABLE_IP4);
             ESP_LOGI(TAG, "mDNS re-enabled after IP obtained");
         }
+
+        // Rejoin multicast group after WiFi reconnect — IGMP membership
+        // is lost when the interface goes down
+        network_rejoin_multicast();
     }
 }
 
@@ -387,14 +401,56 @@ esp_err_t network_start_rx(void)
     rx_running = true;
     xTaskCreate(rx_task, "network_rx", 16384, NULL, 5, &rx_task_handle);
 
+    // Start periodic IGMP rejoin timer (prevents group membership expiry)
+    if (!igmp_rejoin_timer) {
+        igmp_rejoin_timer = xTimerCreate("igmp_rejoin",
+            pdMS_TO_TICKS(IGMP_REJOIN_INTERVAL_MS),
+            pdTRUE, NULL, igmp_rejoin_timer_cb);
+        if (igmp_rejoin_timer) {
+            xTimerStart(igmp_rejoin_timer, 0);
+        }
+    }
+
     ESP_LOGI(TAG, "RX started on port %d, multicast group %s", AUDIO_PORT, MULTICAST_GROUP);
     return ESP_OK;
+}
+
+void network_rejoin_multicast(void)
+{
+    if (rx_socket < 0 || !wifi_connected) {
+        return;
+    }
+
+    // Drop existing membership (ignore errors — may not be joined)
+    struct ip_mreq mreq = {
+        .imr_multiaddr.s_addr = inet_addr(MULTICAST_GROUP),
+        .imr_interface.s_addr = local_ip.addr,
+    };
+    setsockopt(rx_socket, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+
+    // Re-join with current local IP
+    if (setsockopt(rx_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        // Retry with INADDR_ANY
+        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+        if (setsockopt(rx_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+            ESP_LOGE(TAG, "IGMP rejoin failed: errno=%d", errno);
+            return;
+        }
+    }
+    ESP_LOGI(TAG, "IGMP multicast group rejoined: %s", MULTICAST_GROUP);
 }
 
 void network_stop_rx(void)
 {
     if (rx_socket < 0) {
         return;
+    }
+
+    // Stop IGMP rejoin timer
+    if (igmp_rejoin_timer) {
+        xTimerStop(igmp_rejoin_timer, 0);
+        xTimerDelete(igmp_rejoin_timer, 0);
+        igmp_rejoin_timer = NULL;
     }
 
     rx_running = false;

@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 // Firmware version - bump with every firmware change
-#define FIRMWARE_VERSION        "2.8.4"
+#define FIRMWARE_VERSION        "2.9.1"
 
 // Network Configuration
 #define CONTROL_PORT        5004
@@ -88,8 +88,17 @@ typedef enum {
 // Parameters for the test_tone task spawned by /api/test
 typedef struct {
     uint8_t device_id[DEVICE_ID_LENGTH];
-    int     result;     // 0 = success, 1 = aborted by PTT
-    void   *semaphore;  // SemaphoreHandle_t — signalled on completion
+    int     duration_frames;  // Number of 20ms frames to generate (default 150 = 3s)
+    int     result;           // 0 = success, 1 = aborted by PTT
+    void   *semaphore;        // SemaphoreHandle_t — signalled on completion
 } test_tone_params_t;
+
+// Default test tone duration: 150 frames = 3 seconds at 20ms/frame
+#define TEST_TONE_DEFAULT_FRAMES    150
+#define TEST_TONE_MIN_FRAMES        1       // 0.02s minimum
+#define TEST_TONE_MAX_FRAMES        600     // 12s maximum
+
+// Threshold above which test_tone returns async (caller polls /api/status)
+#define TEST_TONE_SYNC_MAX_FRAMES   150     // <= 3s: synchronous response
 
 #endif // PROTOCOL_H

@@ -13,7 +13,7 @@ version: 1.0.0
 - PLC (Packet Loss Concealment) and FEC (Forward Error Correction) enabled
 
 ## Transport
-- **Broadcast**: UDP multicast 224.0.0.100:5005
+- **Broadcast**: UDP multicast 239.255.0.100:5005
 - **Targeted**: UDP unicast to device IP
 - **`IP_MULTICAST_LOOP=0`** must be set on TX socket in BOTH hub and firmware — prevents self-reception
 

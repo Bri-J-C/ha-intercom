@@ -4,10 +4,10 @@
 | Device | IP | Notes |
 |---|---|---|
 | Home Assistant server | 10.0.0.8 | MQTT broker, add-on host |
-| Bedroom Intercom | 10.0.0.36 | |
-| INTERCOM2 | 10.0.0.38 | Weak WiFi — OTA via HA server only |
+| Bedroom Intercom | 10.0.0.15 | |
+| INTERCOM2 | 10.0.0.14 | Weak WiFi — OTA via HA server only |
 | Office Intercom | 10.0.0.41 | Was offline |
-| Multicast audio | 224.0.0.100:5005 | |
+| Multicast audio | 239.255.0.100:5005 | |
 
 ## WS2812 LED States
 | Color | State |
@@ -22,7 +22,7 @@
 ## Key Implementation Constraints
 - `IP_MULTICAST_LOOP=0` must be set on TX socket in BOTH hub and firmware — prevents devices receiving their own multicast
 - `sdkconfig.esp32s3` controls PSRAM — NOT `sdkconfig.defaults`. After any sdkconfig change: `pio run -t fullclean` before building
-- INTERCOM2 (10.0.0.38) cannot be flashed directly — must stage through HA server. Use `flash-intercom2` skill.
+- INTERCOM2 (10.0.0.14) cannot be flashed directly — must stage through HA server. Use `flash-intercom2` skill.
 - Opus encoder/decoder: ~36KB, allocated in PSRAM. Use `esp_ptr_external_ram()` to verify. `SPIRAM_IGNORE_NOTFOUND=y` ensures boards without PSRAM still boot.
 
 ## Settings Encryption (ESP32)

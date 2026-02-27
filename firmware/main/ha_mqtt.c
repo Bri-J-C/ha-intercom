@@ -945,6 +945,11 @@ static void handle_mqtt_data(esp_mqtt_event_handle_t event)
             // Check if we're the target (case-insensitive, also match "All Rooms" broadcast)
             if (strcasecmp(target, cfg->room_name) == 0 ||
                 strcasecmp(target, "All Rooms") == 0) {
+                // DND: block non-emergency calls silently
+                if (cfg->dnd_enabled) {
+                    ESP_LOGI(TAG, "[CALL] blocked by DND: caller=%s target=%s", caller, target);
+                    return;
+                }
                 ESP_LOGI(TAG, "[CALL] incoming: caller=%s target=%s", caller, target);
                 strncpy(incoming_call_caller, caller, sizeof(incoming_call_caller) - 1);
                 incoming_call_pending = true;

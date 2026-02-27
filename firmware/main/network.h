@@ -104,6 +104,12 @@ esp_err_t network_start_mdns(const char *hostname);
 void network_get_tx_stats(uint32_t *sent, uint32_t *failed, int *last_errno);
 
 /**
+ * Rejoin multicast group (IGMP refresh).
+ * Safe to call periodically — drops and re-adds membership.
+ */
+void network_rejoin_multicast(void);
+
+/**
  * Deinitialize network.
  */
 void network_deinit(void);
