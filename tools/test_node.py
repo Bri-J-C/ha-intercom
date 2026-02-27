@@ -50,15 +50,16 @@ PRIORITY_NORMAL = 0
 PRIORITY_HIGH = 1
 PRIORITY_EMERGENCY = 2
 
-# --- Network targets ---
-MQTT_HOST = "10.0.0.8"
-MQTT_PORT = 1883
-MQTT_USER = "REDACTED_MQTT_USER"
-MQTT_PASS = "REDACTED_MQTT_PASS"
+# --- Network targets (from environment) ---
+import os as _os
+MQTT_HOST = _os.environ.get("MQTT_HOST", _os.environ.get("HUB_IP", ""))
+MQTT_PORT = int(_os.environ.get("MQTT_PORT", "1883"))
+MQTT_USER = _os.environ.get("MQTT_USER", "")
+MQTT_PASS = _os.environ.get("MQTT_PASS", "")
 
 DEVICES = {
-    "bedroom":   {"name": "Bedroom Intercom", "ip": "10.0.0.15"},
-    "intercom2": {"name": "INTERCOM2",        "ip": "10.0.0.14"},
+    "bedroom":   {"name": "Bedroom Intercom", "ip": _os.environ.get("BEDROOM_IP", "")},
+    "intercom2": {"name": "INTERCOM2",        "ip": _os.environ.get("INTERCOM2_IP", "")},
 }
 
 # Our fake device identity

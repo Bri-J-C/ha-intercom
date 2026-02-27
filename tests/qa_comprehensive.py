@@ -35,26 +35,34 @@ from datetime import datetime
 from typing import Optional, Tuple, Dict, List, Any
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration — loads from tests/.env or environment variables
 # ---------------------------------------------------------------------------
-BEDROOM_IP   = "10.0.0.15"
-INTERCOM2_IP = "10.0.0.14"
-HUB_IP       = "10.0.0.8"
-HUB_PORT     = 8099
-MQTT_HOST    = "10.0.0.8"
-MQTT_PORT    = 1883
-MQTT_USER    = "REDACTED_MQTT_USER"
-MQTT_PASS    = "REDACTED_MQTT_PASS"
+import os as _os
+_env_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".env")
+if _os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                _os.environ.setdefault(_k.strip(), _v.strip())
+
+BEDROOM_IP   = _os.environ.get("BEDROOM_IP", "")
+INTERCOM2_IP = _os.environ.get("INTERCOM2_IP", "")
+HUB_IP       = _os.environ.get("HUB_IP", "")
+HUB_PORT     = int(_os.environ.get("HUB_PORT", "8099"))
+MQTT_HOST    = _os.environ.get("MQTT_HOST", HUB_IP)
+MQTT_PORT    = int(_os.environ.get("MQTT_PORT", "1883"))
+MQTT_USER    = _os.environ.get("MQTT_USER", "")
+MQTT_PASS    = _os.environ.get("MQTT_PASS", "")
 EXPECTED_VERSION = "2.8.6"
 
-# Known MQTT unique IDs (last 4 bytes of device MAC, hex)
-BEDROOM_UNIQUE_ID  = "intercom_XXXXXXXX"
-INTERCOM2_UNIQUE_ID = "intercom_YYYYYYYY"
-HUB_UNIQUE_ID      = "intercom_ZZZZZZZZ"
+BEDROOM_UNIQUE_ID   = _os.environ.get("BEDROOM_UNIQUE_ID", "")
+INTERCOM2_UNIQUE_ID = _os.environ.get("INTERCOM2_UNIQUE_ID", "")
+HUB_UNIQUE_ID       = _os.environ.get("HUB_UNIQUE_ID", "")
 
-# Hub audio_stats keys by device_id from packet header (8 bytes, 16 hex chars)
-BEDROOM_DEVICE_ID  = "XXXXXXXXXXXXXXXX"
-INTERCOM2_DEVICE_ID = "YYYYYYYYYYYYYYYY"
+BEDROOM_DEVICE_ID   = _os.environ.get("BEDROOM_DEVICE_ID", "")
+INTERCOM2_DEVICE_ID = _os.environ.get("INTERCOM2_DEVICE_ID", "")
 
 DEVICE_TIMEOUT = 10
 HUB_TIMEOUT    = 5

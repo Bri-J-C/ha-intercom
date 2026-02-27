@@ -6,7 +6,7 @@
 - **Bedroom Intercom**: 10.0.0.15 (serial /dev/ttyACM0)
 - **INTERCOM2**: 10.0.0.14 (serial /dev/ttyACM1)
 - **Hub**: 10.0.0.8:8099
-- **MQTT**: 10.0.0.8:1883 (user: REDACTED_MQTT_USER, pass: REDACTED_MQTT_PASS)
+- **MQTT**: $MQTT_HOST:$MQTT_PORT (credentials from tests/.env)
 
 ### Hub API Endpoints
 - **audio_stats**: GET/POST http://10.0.0.8:8099/api/audio_stats
@@ -346,7 +346,7 @@
 ### Prerequisites
 - Both devices flashed with v2.8.3, online and MQTT connected
 - Hub deployed with v2.5.2, audio_stats endpoint functional
-- MQTT credentials verified (REDACTED_MQTT_USER / REDACTED_MQTT_PASS)
+- MQTT credentials verified ($MQTT_USER / $MQTT_PASS)
 - Network stable (devices and hub on 10.0.0.x subnet, multicast 239.255.0.100:5005 routing verified)
 
 ### Execution Order
@@ -369,8 +369,8 @@ curl -s http://10.0.0.15/api/status | jq
 curl -s -X POST http://10.0.0.15/api/test -d '{"action":"beep"}' | jq
 
 # MQTT tests
-mosquitto_pub -h 10.0.0.8 -u REDACTED_MQTT_USER -P REDACTED_MQTT_PASS -t intercom/call -m '{"target":"All Rooms"}'
-mosquitto_sub -h 10.0.0.8 -u REDACTED_MQTT_USER -P REDACTED_MQTT_PASS -t 'intercom/#'
+mosquitto_pub -h 10.0.0.8 -u $MQTT_USER -P $MQTT_PASS -t intercom/call -m '{"target":"All Rooms"}'
+mosquitto_sub -h 10.0.0.8 -u $MQTT_USER -P $MQTT_PASS -t 'intercom/#'
 
 # WebSocket (Python)
 import websocket

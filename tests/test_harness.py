@@ -34,24 +34,42 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Load tests/.env if present (before reading os.environ)
 # ---------------------------------------------------------------------------
-BEDROOM_IP = "10.0.0.15"
-INTERCOM2_IP = "10.0.0.14"
-HUB_IP = "10.0.0.8"
-HUB_PORT = 8099
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                os.environ.setdefault(_k.strip(), _v.strip())
 
-MQTT_HOST = "10.0.0.8"
-MQTT_PORT = 1883
+# ---------------------------------------------------------------------------
+# Configuration — all environment-specific values from env vars.
+# Set these in your shell or in tests/.env before running:
+#   export BEDROOM_IP=10.0.0.15  INTERCOM2_IP=10.0.0.14  HUB_IP=10.0.0.8
+#   export MQTT_USER=myuser  MQTT_PASS=mypass
+#   export BEDROOM_UNIQUE_ID=intercom_XXXX  INTERCOM2_UNIQUE_ID=intercom_YYYY
+#   export HUB_UNIQUE_ID=intercom_ZZZZ
+#   export BEDROOM_DEVICE_ID=XXXXXXXXXXXXXXXX  INTERCOM2_DEVICE_ID=YYYYYYYYYYYYYYYY
+# ---------------------------------------------------------------------------
+BEDROOM_IP = os.environ.get("BEDROOM_IP", "")
+INTERCOM2_IP = os.environ.get("INTERCOM2_IP", "")
+HUB_IP = os.environ.get("HUB_IP", "")
+HUB_PORT = int(os.environ.get("HUB_PORT", "8099"))
+
+MQTT_HOST = os.environ.get("MQTT_HOST", HUB_IP)
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_USER = os.environ.get("MQTT_USER", "")
 MQTT_PASS = os.environ.get("MQTT_PASS", "")
 
-BEDROOM_UNIQUE_ID = "intercom_XXXXXXXX"
-INTERCOM2_UNIQUE_ID = "intercom_YYYYYYYY"
-HUB_UNIQUE_ID = "intercom_ZZZZZZZZ"
+BEDROOM_UNIQUE_ID = os.environ.get("BEDROOM_UNIQUE_ID", "")
+INTERCOM2_UNIQUE_ID = os.environ.get("INTERCOM2_UNIQUE_ID", "")
+HUB_UNIQUE_ID = os.environ.get("HUB_UNIQUE_ID", "")
 
-BEDROOM_DEVICE_ID = "XXXXXXXXXXXXXXXX"
-INTERCOM2_DEVICE_ID = "YYYYYYYYYYYYYYYY"
+BEDROOM_DEVICE_ID = os.environ.get("BEDROOM_DEVICE_ID", "")
+INTERCOM2_DEVICE_ID = os.environ.get("INTERCOM2_DEVICE_ID", "")
 
 CALL_TOPIC = "intercom/call"
 HUB_NOTIFY_TOPIC = f"intercom/{HUB_UNIQUE_ID}/notify"
@@ -65,8 +83,8 @@ PACKETS_PER_SECOND = 50
 HEAP_LEAK_THRESHOLD_BYTES = 8192
 
 SERIAL_PORTS = {
-    "bedroom": "/dev/ttyACM0",
-    "intercom2": "/dev/ttyACM1",
+    "bedroom": os.environ.get("BEDROOM_SERIAL", "/dev/ttyACM0"),
+    "intercom2": os.environ.get("INTERCOM2_SERIAL", "/dev/ttyACM1"),
 }
 
 DEVICES = {

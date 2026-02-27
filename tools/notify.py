@@ -3,10 +3,11 @@
 import sys
 import paho.mqtt.publish as publish
 
-MQTT_HOST = "10.0.0.8"
-MQTT_PORT = 1883
-MQTT_USER = "REDACTED_MQTT_USER"
-MQTT_PASS = "REDACTED_MQTT_PASS"
+import os
+MQTT_HOST = os.environ.get("MQTT_HOST", os.environ.get("HUB_IP", ""))
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_USER = os.environ.get("MQTT_USER", "")
+MQTT_PASS = os.environ.get("MQTT_PASS", "")
 TOPIC = "claude/notify"
 
 def notify(message, title="Claude Code"):
