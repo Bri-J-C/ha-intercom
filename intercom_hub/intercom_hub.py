@@ -145,7 +145,7 @@ def html_escape(text: str) -> str:
 
 
 # Version - single source of truth
-VERSION = "2.5.2"  # Add /api/audio_stats endpoint for QA audio-path verification
+VERSION = "2.5.4"  # Fix MQTT handler crash: json.loads("null") → NoneType.get() killed MQTT thread
 
 try:
     from aiohttp import web
@@ -241,7 +241,7 @@ channel_wait_timeout = 5.0  # max seconds to wait for channel before sending
 tx_lock = threading.Lock()
 
 # State lock - protects compound read-modify-write on critical shared state:
-# current_state, web_ptt_active, last_ptt_time (used in is_channel_busy)
+# current_state, web_ptt_active, last_web_ptt_frame_time (used in is_channel_busy)
 state_lock = threading.Lock()
 
 # Priority state
@@ -257,6 +257,8 @@ web_clients = set()  # Connected WebSocket clients
 web_client_ids = {}  # Map WebSocket -> client_id (e.g., "Brians_Phone", "Web_A1B2")
 web_client_topics = {}  # Map client_id -> {"info": topic, "status": topic}
 web_ptt_active = False  # Is a web client transmitting
+last_web_ptt_frame_time = 0.0  # monotonic timestamp of last Web PTT audio frame
+WEB_PTT_IDLE_TIMEOUT = 5.0  # seconds with no audio frames before auto-resetting stuck PTT state
 web_ptt_encoder = None  # Opus encoder for web PTT
 web_event_loop = None  # Event loop for async web operations
 web_tx_lock = None  # Async lock to serialize web PTT transmissions (created at runtime)
@@ -866,6 +868,31 @@ def get_target_ip():
     return None
 
 
+def _check_web_ptt_timeout():
+    """Check if web PTT state is stuck and auto-reset if needed.
+
+    Must be called WITHOUT state_lock held. Acquires state_lock internally.
+
+    Returns True if state was auto-reset (caller should treat channel as free).
+    """
+    global web_ptt_active, current_state
+
+    did_reset = False
+    with state_lock:
+        if web_ptt_active and last_web_ptt_frame_time > 0 and \
+           time.monotonic() - last_web_ptt_frame_time > WEB_PTT_IDLE_TIMEOUT:
+            log.warning(f"Web PTT idle for >{WEB_PTT_IDLE_TIMEOUT:.0f}s with no audio frames — auto-resetting to idle")
+            web_ptt_active = False
+            current_state = "idle"
+            did_reset = True
+
+    # Publish outside lock to avoid deadlock with MQTT/web threads
+    if did_reset:
+        publish_state(state="idle")
+
+    return did_reset
+
+
 def is_channel_busy(our_priority=None):
     """Check if channel is busy considering priority preemption.
 
@@ -876,13 +903,20 @@ def is_channel_busy(our_priority=None):
                       current_tx_priority.
 
     Uses state_lock to ensure a consistent snapshot of the multiple
-    shared variables (current_state, web_ptt_active, last_rx_time)
+    shared variables (current_state, web_ptt_active, last_rx_time, last_web_ptt_frame_time)
     that are written from different threads.
+
+    Side effect: if web_ptt_active is True but no audio frame has been
+    received for WEB_PTT_IDLE_TIMEOUT seconds, auto-resets the stuck
+    PTT state to idle (safety net for unclean WebSocket disconnects).
     """
     global current_tx_priority, current_rx_priority
 
     if our_priority is None:
         our_priority = current_tx_priority
+
+    # Auto-reset stuck web PTT before checking state
+    _check_web_ptt_timeout()
 
     with state_lock:
         # Channel busy if a web client is actively transmitting
@@ -2232,6 +2266,8 @@ def on_mqtt_message(client, userdata, msg):
         # Device info from ESP32 intercoms (validate inputs)
         try:
             data = json.loads(payload)
+            if not isinstance(data, dict):
+                return
             device_id = sanitize_string(data.get("id", ""), 64)
             room = sanitize_room_name(data.get("room", ""))
             ip = data.get("ip", "")
@@ -2272,6 +2308,8 @@ def on_mqtt_message(client, userdata, msg):
         # The chime is streamed from the hub so ESP32 devices no longer need local PCM data.
         try:
             data = json.loads(payload)
+            if not isinstance(data, dict):
+                return
 
             # Skip calls that originated from this hub (via WebSocket) to prevent
             # double-streaming: the WS call handler already streams the chime and
@@ -2331,8 +2369,9 @@ def on_mqtt_message(client, userdata, msg):
             if target_lower not in ("all rooms", "all") and is_mobile_device(target):
                 send_mobile_notification(target, caller)
 
-        except json.JSONDecodeError:
-            pass
+        except Exception as e:
+            if not isinstance(e, json.JSONDecodeError):
+                log.warning(f"Error processing call message: {e}")
 
     elif topic.startswith("intercom/") and topic.endswith("/state"):
         # ESP32 state update - track target for audio routing
@@ -2346,6 +2385,8 @@ def on_mqtt_message(client, userdata, msg):
             device_id = parts[1]
             try:
                 data = json.loads(payload)
+                if not isinstance(data, dict):
+                    raise json.JSONDecodeError("not a dict", payload, 0)
                 state = data.get("state", "")
                 target = data.get("target", "")
 
@@ -2395,7 +2436,7 @@ def on_mqtt_disconnect(client, userdata, disconnect_flags, reason_code, properti
 
 async def websocket_handler(request):
     """Handle WebSocket connections for web PTT."""
-    global web_ptt_active, web_ptt_encoder, current_state, current_chime
+    global web_ptt_active, web_ptt_encoder, current_state, current_chime, last_web_ptt_frame_time
 
     log.debug(f"WebSocket connection request from {request.remote}")
     ws = web.WebSocketResponse()
@@ -2465,6 +2506,7 @@ async def websocket_handler(request):
                     opus_data = web_ptt_encoder.encode(msg.data, FRAME_SIZE)
                     send_audio_packet(opus_data, ptt_target, priority=ptt_priority)
                     frame_count += 1
+                    last_web_ptt_frame_time = time.monotonic()
 
                     # Forward PCM to other web clients (respect target)
                     # Prepend priority byte so receiver can apply DND filtering
@@ -2538,6 +2580,9 @@ async def websocket_handler(request):
 
                             with state_lock:
                                 current_state = "transmitting"
+                            # Initialize frame timestamp so the idle timeout doesn't
+                            # fire before the first audio frame arrives from the client.
+                            last_web_ptt_frame_time = time.monotonic()
                             publish_state(state="transmitting", notify_web=False)  # MQTT only - we handle web clients below
                             log.info(f"Web PTT started -> {target_room}")
 
@@ -2569,7 +2614,7 @@ async def websocket_handler(request):
                             # Reset encoder - prevents state carryover to next session
                             web_ptt_encoder = None
                             publish_state(state="idle", notify_web=False)  # MQTT only - we handle web clients below
-                            log.debug(f"Web PTT stopped ({frame_count} frames)")
+                            log.info(f"Web PTT stopped ({frame_count} frames)")
 
                             # Notify web clients immediately - don't make them wait for the jitter drain gap
                             await broadcast_to_web_clients({'type': 'state', 'status': 'idle'})
@@ -2996,6 +3041,9 @@ async def audio_stats_get_handler(request):
             }
         }
     """
+    # Auto-reset stuck web PTT state so current_state is accurate
+    _check_web_ptt_timeout()
+
     # --- Parse query parameters ---
     try:
         window = float(request.rel_url.query.get("window", "60"))
