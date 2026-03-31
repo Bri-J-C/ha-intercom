@@ -23,3 +23,11 @@ secrets.yaml
 # OS
 .DS_Store
 Thumbs.db
+
+# Sensitive / private files
+CLAUDE.md
+.claude/
+automations/
+tools/
+tests/
+TESTING.md
